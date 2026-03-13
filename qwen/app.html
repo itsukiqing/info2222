@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UniSync | Group Collaboration</title>
+    <style>
+        :root {
+            --primary: #4F46E5;
+            --primary-hover: #4338ca;
+            --bg-body: #F3F4F6;
+            --bg-panel: #FFFFFF;
+            --text-main: #111827;
+            --text-muted: #6B7280;
+            --border: #E5E7EB;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --danger: #EF4444;
+            --sidebar-width: 260px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+        
+        body { background-color: var(--bg-body); color: var(--text-main); display: flex; height: 100vh; overflow: hidden; }
+
+        /* Sidebar */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--bg-panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+        }
+
+        .brand { font-size: 1.5rem; font-weight: 800; color: var(--primary); margin-bottom: 2rem; display: flex; align-items: center; gap: 0.5rem; }
+        
+        .nav-item {
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .nav-item:hover { background-color: #EEF2FF; color: var(--primary); }
+        .nav-item.active { background-color: var(--primary); color: white; }
+        .nav-item svg { width: 20px; height: 20px; }
+
+        /* Main Content */
+        .main-content { flex: 1; padding: 2rem; overflow-y: auto; position: relative; }
+        
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        .header h1 { font-size: 1.8rem; font-weight: 700; }
+        
+        .view-section { display: none; animation: fadeIn 0.3s ease; }
+        .view-section.active { display: block; }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* --- 1. Chat Interface --- */
+        .chat-container {
+            background: var(--bg-panel);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            height: 70vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header { padding: 1rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 1.5rem; background: #F9FAFB; }
+        
+        .message-group { margin-bottom: 1.5rem; }
+        .topic-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.5rem; font-weight: 700; }
+        
+        .message { display: flex; gap: 1rem; margin-bottom: 1rem; }
+        .avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: #ddd; }
+        .msg-content { background: white; padding: 0.75rem 1rem; border-radius: 0 12px 12px 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); max-width: 600px; }
+        .msg-meta { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem; display: flex; justify-content: space-between; }
+        .msg-text { line-height: 1.5; }
+
+        .chat-input-area { padding: 1rem; border-top: 1px solid var(--border); display: flex; gap: 1rem; }
+        .chat-input { flex: 1; padding: 0.75rem; border: 1px solid var(--border); border-radius: 8px; outline: none; }
+        .btn { padding: 0.75rem 1.5rem; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; transition: 0.2s; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+
+        /* --- 2. Dashboard & Members --- */
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+        
+        .member-card { background: var(--bg-panel); padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .member-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+        .member-info h3 { font-size: 1.1rem; }
+        .member-info p { color: var(--text-muted); font-size: 0.9rem; }
+        .status-badge { padding: 0.25rem 0.5rem; border-radius: 20px; font-size: 0.75rem; font-weight: 700; }
+        .status-online { background: #D1FAE5; color: #065F46; }
+        .status-busy { background: #FEE2E2; color: #991B1B; }
+
+        .task-list { list-style: none; }
+        .task-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; font-size: 0.9rem; }
+        .task-item:last-child { border-bottom: none; }
+        .task-checkbox { accent-color: var(--primary); }
+
+        /* --- 3. Heatmap --- */
+        .heatmap-container { background: var(--bg-panel); padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 1rem; }
+        .cal-day { aspect-ratio: 1; border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; position: relative; display: flex; flex-direction: column; justify-content: space-between; }
+        
+        .cal-day.empty { background: transparent; border: none; }
+        .cal-day-header { font-weight: 700; color: var(--text-muted); font-size: 0.8rem; }
+        .cal-date { font-size: 0.9rem; font-weight: 600; }
+        
+        /* Heatmap Colors */
+        .stress-low { background-color: #ECFDF5; border-color: #A7F3D0; }
+        .stress-med { background-color: #FEF3C7; border-color: #FDE68A; }
+        .stress-high { background-color: #FEE2E2; border-color: #FCA5A5; }
+        
+        .deadline-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+        .dot-red { background: var(--danger); }
+        .dot-blue { background: var(--primary); }
+        
+        .meeting-suggestion { margin-top: 2rem; padding: 1rem; background: #EEF2FF; border-radius: 8px; border-left: 4px solid var(--primary); }
+
+        /* --- 4. Task Panel --- */
+        .task-panel { background: var(--bg-panel); padding: 1.5rem; border-radius: 12px; }
+        .task-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; padding: 1rem; border-bottom: 1px solid var(--border); align-items: center; }
+        .task-row.header { font-weight: 700; color: var(--text-muted); background: #F9FAFB; border-radius: 8px; }
+        .assignee-select { padding: 0.5rem; border-radius: 6px; border: 1px solid var(--border); width: 100%; }
+
+        /* --- 5. Catch Me Up Modal --- */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: none; justify-content: center; align-items: center; z-index: 1000; }
+        .modal { background: white; width: 500px; padding: 2rem; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); }
+        .modal h2 { margin-bottom: 1rem; color: var(--primary); }
+        .summary-list { margin-bottom: 1.5rem; max-height: 300px; overflow-y: auto; }
+        .summary-item { padding: 0.75rem; background: #F3F4F6; margin-bottom: 0.5rem; border-radius: 6px; font-size: 0.9rem; }
+        .close-modal { float: right; cursor: pointer; font-size: 1.5rem; }
+
+        /* Utility */
+        .btn-catchup { background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.85rem; cursor: pointer; }
+        .btn-catchup:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar">
+        <div class="brand">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+            UniSync
+        </div>
+        <div class="nav-item active" onclick="switchView('chat', this)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            Group Chat
+        </div>
+        <div class="nav-item" onclick="switchView('dashboard', this)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            Dashboard
+        </div>
+        <div class="nav-item" onclick="switchView('heatmap', this)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+            Stress Heatmap
+        </div>
+        <div class="nav-item" onclick="switchView('tasks', this)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+            Task Manager
+        </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+        
+        <!-- 1. Chat View -->
+        <section id="chat" class="view-section active">
+            <div class="header">
+                <h1>Project: Marketing Strategy</h1>
+                <button class="btn btn-catchup" onclick="openCatchMeUp()">✨ Catch Me Up</button>
+            </div>
+            <div class="chat-container">
+                <div class="chat-header">
+                    <span><strong>#general-discussion</strong> • 4 Members Online</span>
+                </div>
+                <div class="chat-messages" id="chatMessages">
+                    <!-- Messages injected via JS -->
+                </div>
+                <div class="chat-input-area">
+                    <input type="text" class="chat-input" placeholder="Type a message..." id="msgInput">
+                    <button class="btn btn-primary" onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. Dashboard View -->
+        <section id="dashboard" class="view-section">
+            <div class="header">
+                <h1>Team Overview</h1>
+            </div>
+            <div class="dashboard-grid" id="memberGrid">
+                <!-- Members injected via JS -->
+            </div>
+        </section>
+
+        <!-- 3. Heatmap View -->
+        <section id="heatmap" class="view-section">
+            <div class="header">
+                <h1>Deadline Stress Heatmap</h1>
+            </div>
+            <div class="heatmap-container">
+                <div style="display: flex; gap: 1rem; margin-bottom: 1rem; font-size: 0.9rem;">
+                    <span><span class="status-badge status-online" style="background:#ECFDF5; color:#065F46">Low Stress</span></span>
+                    <span><span class="status-badge" style="background:#FEF3C7; color:#92400E">Moderate</span></span>
+                    <span><span class="status-badge status-busy">High Stress / Clash</span></span>
+                </div>
+                <div class="calendar-grid" id="calendarGrid">
+                    <!-- Calendar injected via JS -->
+                </div>
+                <div class="meeting-suggestion" id="meetingSuggestion">
+                    <!-- Suggestion injected via JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. Task Panel View -->
+        <section id="tasks" class="view-section">
+            <div class="header">
+                <h1>Task Assignments</h1>
+                <button class="btn btn-primary" onclick="addNewTask()">+ Add Task</button>
+            </div>
+            <div class="task-panel">
+                <div class="task-row header">
+                    <div>Task Name</div>
+                    <div>Assignee</div>
+                    <div>Due Date</div>
+                    <div>Status</div>
+                    <div>Action</div>
+                </div>
+                <div id="taskList">
+                    <!-- Tasks injected via JS -->
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Catch Me Up Modal -->
+    <div class="modal-overlay" id="catchUpModal">
+        <div class="modal">
+            <span class="close-modal" onclick="closeCatchMeUp()">&times;</span>
+            <h2>Catch Up: Alex</h2>
+            <p style="margin-bottom: 1rem; color: #666;">Here is what you missed while you were away.</p>
+            <div class="summary-list" id="catchUpContent">
+                <!-- Content injected via JS -->
+            </div>
+            <button class="btn btn-primary" onclick="closeCatchMeUp()">Got it!</button>
+        </div>
+    </div>
+
+    <script>
+        // --- MOCK DATA ---
+        const currentUser = { id: 1, name: "You", avatar: "https://i.pravatar.cc/150?u=1" };
+        
+        const members = [
+            { id: 1, name: "You", role: "Project Lead", status: "online", avatar: "https://i.pravatar.cc/150?u=1" },
+            { id: 2, name: "Sarah Chen", role: "Researcher", status: "busy", avatar: "https://i.pravatar.cc/150?u=2" },
+            { id: 3, name: "Mike Ross", role: "Designer", status: "online", avatar: "https://i.pravatar.cc/150?u=3" },
+            { id: 4, name: "Alex Johnson", role: "Writer", status: "offline", avatar: "https://i.pravatar.cc/150?u=4" }
+        ];
+
+        const tasks = [
+            { id: 1, title: "Literature Review", assigneeId: 2, dueDate: "2023-10-25", status: "In Progress" },
+            { id: 2, title: "Slide Deck Design", assigneeId: 3, dueDate: "2023-10-28", status: "Not Started" },
+            { id: 3, title: "Final Report Draft", assigneeId: 4, dueDate: "2023-10-30", status: "Not Started" },
+            { id: 4, title: "Budget Analysis", assigneeId: 1, dueDate: "2023-10-26", status: "Done" }
+        ];
+
+        const messages = [
+            { id: 1, senderId: 2, content: "Has anyone started the literature review yet?", timestamp: "10:30 AM", topic: "Research" },
+            { id: 2, senderId: 3, content: "I'm working on the wireframes. Should be done by Friday.", timestamp: "10:32 AM", topic: "Design" },
+            { id: 3, senderId: 4, content: "@Sarah I can help with the research if you're swamped.", timestamp: "10:45 AM", topic: "Research" },
+            { id: 4, senderId: 1, content: "Great teamwork guys. Let's sync up on Thursday.", timestamp: "11:00 AM", topic: "General" }
+        ];
+
+        const deadlines = [
+            { id: 1, title: "Mid-term Exam", ownerId: 1, date: 25, stress: 3 },
+            { id: 2, title: "Group Presentation", ownerId: 2, date: 28, stress: 5 },
+            { id: 3, title: "Essay Submission", ownerId: 2, date: 28, stress: 5 }, // Clash
+            { id: 4, title: "Lab Report", ownerId: 3, date: 29, stress: 4 },
+            { id: 5, title: "Quiz", ownerId: 4, date: 25, stress: 2 }
+        ];
+
+        // --- NAVIGATION LOGIC ---
+        function switchView(viewId, navElement) {
+            // Hide all sections
+            document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
+            // Show target section
+            document.getElementById(viewId).classList.add('active');
+            
+            // Update Nav UI
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            navElement.classList.add('active');
+
+            // Re-render specific views if needed
+            if(viewId === 'heatmap') renderHeatmap();
+            if(viewId === 'dashboard') renderDashboard();
+            if(viewId === 'tasks') renderTasks();
+        }
+
+        // --- CHAT LOGIC ---
+        function renderChat() {
+            const container = document.getElementById('chatMessages');
+            container.innerHTML = '';
+            
+            // Group by topic
+            const topics = {};
+            messages.forEach(msg => {
+                if(!topics[msg.topic]) topics[msg.topic] = [];
+                topics[msg.topic].push(msg);
+            });
+
+            for (const [topic, topicMsgs] of Object.entries(topics)) {
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'message-group';
+                
+                const label = document.createElement('div');
+                label.className = 'topic-label';
+                label.innerText = topic;
+                groupDiv.appendChild(label);
+
+                topicMsgs.forEach(msg => {
+                    const sender = members.find(m => m.id === msg.senderId);
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = 'message';
+                    msgDiv.innerHTML = `
+                        <img src="${sender.avatar}" class="avatar" alt="${sender.name}">
+                        <div>
+                            <div class="msg-meta">
+                                <strong>${sender.name}</strong>
+                                <span>${msg.timestamp}</span>
+                            </div>
+                            <div class="msg-content">
+                                <div class="msg-text">${msg.content}</div>
+                            </div>
+                        </div>
+                    `;
+                    groupDiv.appendChild(msgDiv);
+                });
+                container.appendChild(groupDiv);
+            }
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('msgInput');
+            if(!input.value) return;
+            
+            const newMsg = {
+                id: messages.length + 1,
+                senderId: 1, // Current user
+                content: input.value,
+                timestamp: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                topic: "General"
+            };
+            messages.push(newMsg);
+            input.value = '';
+            renderChat();
+        }
+
+        // --- DASHBOARD LOGIC ---
+        function renderDashboard() {
+            const grid = document.getElementById('memberGrid');
+            grid.innerHTML = '';
+
+            members.forEach(member => {
+                const memberTasks = tasks.filter(t => t.assigneeId === member.id);
+                const statusClass = member.status === 'online' ? 'status-online' : 'status-busy';
+                
+                let tasksHtml = '';
+                memberTasks.forEach(t => {
+                    tasksHtml += `
+                        <li class="task-item">
+                            <input type="checkbox" class="task-checkbox" ${t.status === 'Done' ? 'checked' : ''}>
+                            <span style="${t.status === 'Done' ? 'text-decoration: line-through; color: #999' : ''}">${t.title}</span>
+                        </li>
+                    `;
+                });
+
+                const card = document.createElement('div');
+                card.className = 'member-card';
+                card.innerHTML = `
+                    <div class="member-header">
+                        <img src="${member.avatar}" class="avatar" style="width:50px; height:50px;">
+                        <div class="member-info">
+                            <h3>${member.name}</h3>
+                            <p>${member.role}</p>
+                        </div>
+                        <span class="status-badge ${statusClass}">${member.status}</span>
+                    </div>
+                    <h4 style="font-size: 0.9rem; margin-bottom: 0.5rem; color: var(--text-muted);">Current Tasks</h4>
+                    <ul class="task-list">
+                        ${tasksHtml || '<li style="color:#999; font-size:0.85rem;">No active tasks</li>'}
+                    </ul>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // --- HEATMAP LOGIC ---
+        function renderHeatmap() {
+            const grid = document.getElementById('calendarGrid');
+            grid.innerHTML = '';
+            
+            // Add Day Headers
+            const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            days.forEach(d => {
+                const el = document.createElement('div');
+                el.className = 'cal-day-header';
+                el.innerText = d;
+                grid.appendChild(el);
+            });
+
+            // Mock Calendar Logic (Assume current month starts on Tuesday for demo)
+            // Fill empty slots
+            for(let i=0; i<2; i++) {
+                const el = document.createElement('div');
+                el.className = 'cal-day empty';
+                grid.appendChild(el);
+            }
+
+            // Generate Days
+            let bestDay = null;
+            let minStress = 999;
+
+            for(let i=1; i<=30; i++) {
+                // Calculate stress for this day
+                const dayDeadlines = deadlines.filter(d => d.date === i);
+                let stressScore = dayDeadlines.reduce((acc, curr) => acc + curr.stress, 0);
+                
+                // Determine class
+                let stressClass = 'stress-low';
+                if(stressScore > 5) stressClass = 'stress-med';
+                if(stressScore > 8) stressClass = 'stress-high';
+
+                // Track best meeting day
+                if(stressScore < minStress && i > new Date().getDate()) {
+                    minStress = stressScore;
+                    bestDay = i;
+                }
+
+                // Render Day Cell
+                const cell = document.createElement('div');
+                cell.className = `cal-day ${stressClass}`;
+                
+                let dotsHtml = '';
+                dayDeadlines.forEach(d => {
+                    const color = d.stress > 4 ? 'dot-red' : 'dot-blue';
+                    dotsHtml += `<div style="font-size:0.7rem; margin-top:2px;"><span class="deadline-dot ${color}"></span>${d.title}</div>`;
+                });
+
+                cell.innerHTML = `
+                    <span class="cal-date">${i}</span>
+                    <div>${dotsHtml}</div>
+                `;
+                grid.appendChild(cell);
+            }
+
+            // Render Suggestion
+            const suggestionBox = document.getElementById('meetingSuggestion');
+            if(bestDay) {
+                suggestionBox.innerHTML = `<strong>Recommended Meeting Time:</strong> The ${bestDay}th looks like the least stressful day for the group to meet.`;
+            } else {
+                suggestionBox.innerHTML = `<strong>Warning:</strong> The upcoming week is extremely busy for everyone.`;
+            }
+        }
+
+        // --- TASK MANAGER LOGIC ---
+        function renderTasks() {
+            const list = document.getElementById('taskList');
+            list.innerHTML = '';
+
+            tasks.forEach(task => {
+                const assignee = members.find(m => m.id === task.assigneeId);
+                const row = document.createElement('div');
+                row.className = 'task-row';
+                row.innerHTML = `
+                    <div>${task.title}</div>
+                    <div>
+                        <select class="assignee-select" onchange="updateAssignee(${task.id}, this.value)">
+                            ${members.map(m => `<option value="${m.id}" ${m.id === task.assigneeId ? 'selected' : ''}>${m.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div>${task.dueDate}</div>
+                    <div><span class="status-badge ${task.status === 'Done' ? 'status-online' : 'status-busy'}">${task.status}</span></div>
+                    <div>
+                        <button class="btn-catchup" style="background:none; color:#666; border:1px solid #ddd;" onclick="deleteTask(${task.id})">✕</button>
+                    </div>
+                `;
+                list.appendChild(row);
+            });
+        }
+
+        function updateAssignee(taskId, newAssigneeId) {
+            const task = tasks.find(t => t.id === taskId);
+            task.assigneeId = parseInt(newAssigneeId);
+            // In a real app, send API request here
+        }
+
+        function deleteTask(taskId) {
+            const index = tasks.findIndex(t => t.id === taskId);
+            if(index > -1) {
+                tasks.splice(index, 1);
+                renderTasks();
+            }
+        }
+
+        function addNewTask() {
+            const title = prompt("Enter task name:");
+            if(title) {
+                tasks.push({
+                    id: Date.now(),
+                    title: title,
+                    assigneeId: 1,
+                    dueDate: "TBD",
+                    status: "Not Started"
+                });
+                renderTasks();
+            }
+        }
+
+        // --- CATCH ME UP LOGIC ---
+        function openCatchMeUp() {
+            const modal = document.getElementById('catchUpModal');
+            const content = document.getElementById('catchUpContent');
+            modal.style.display = 'flex';
+            
+            // Simulate AI Summary generation
+            content.innerHTML = `
+                <div class="summary-item">
+                    <strong>10:30 AM - Sarah:</strong> Asked about Literature Review status.
+                </div>
+                <div class="summary-item">
+                    <strong>10:45 AM - Alex:</strong> Offered to help Sarah with research.
+                </div>
+                <div class="summary-item">
+                    <strong>11:00 AM - You:</strong> Suggested a sync on Thursday.
+                </div>
+                <div style="margin-top:1rem; padding:0.5rem; background:#e0e7ff; border-radius:4px; font-size:0.85rem;">
+                    <strong>AI Insight:</strong> The team is coordinating on Research. Alex is available to assist Sarah.
+                </div>
+            `;
+        }
+
+        function closeCatchMeUp() {
+            document.getElementById('catchUpModal').style.display = 'none';
+        }
+
+        // --- INITIALIZATION ---
+        window.onload = function() {
+            renderChat();
+            // Dashboard, Heatmap, and Tasks are rendered on demand via switchView
+        };
+
+    </script>
+</body>
+</html>
