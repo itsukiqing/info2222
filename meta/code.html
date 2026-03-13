@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GroupConnect: University Group Collaboration</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="code.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="logo-section">
+                <i class="fas fa-users-crown"></i>
+                <h1>GroupConnect</h1>
+            </div>
+            <nav class="navigation">
+                <ul>
+                    <li class="active" data-section="chat"><a href="#"><i class="fas fa-comments"></i> Real-time Chat</a></li>
+                    <li data-section="dashboard"><a href="#"><i class="fas fa-tachometer-alt"></i> Group Dashboard</a></li>
+                    <li data-section="heatmap"><a href="#"><i class="fas fa-calendar-alt"></i> Deadline Heatmap</a></li>
+                    <li data-section="tasks"><a href="#"><i class="fas fa-tasks"></i> Task Assignment</a></li>
+                    <li><a href="#"><i class="fas fa-cog"></i> Settings</a></li>
+                </ul>
+            </nav>
+            <div class="profile-section">
+                <img src="https://i.pravatar.cc/150?img=8" alt="User Avatar" class="profile-avatar">
+                <div class="profile-info">
+                    <span class="profile-name">You (Guest)</span>
+                    <span class="profile-email">guest@uni.edu</span>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <header class="main-header">
+                <h2 id="current-section-title">Real-time Chat</h2>
+                <div class="header-actions">
+                    <button class="btn btn-secondary"><i class="fas fa-bell"></i> Notifications</button>
+                    <button class="btn btn-primary"><i class="fas fa-plus"></i> New Assignment</button>
+                </div>
+            </header>
+
+            <section id="chat-section" class="content-section active">
+                <div class="chat-sidebar">
+                    <h3>Topics</h3>
+                    <ul id="chat-topics">
+                        <li class="active" data-topic="t_general">General Discussion</li>
+                        <li data-topic="t_ui">UI Design</li>
+                        <li data-topic="t_ai_ethics">AI Ethics Research</li>
+                        <li data-topic="t_proposal">Project Proposal</li>
+                    </ul>
+                    <button class="btn btn-add-topic"><i class="fas fa-plus"></i> Add Topic</button>
+                </div>
+                <div class="chat-main">
+                    <div class="chat-messages" id="chat-messages">
+                        <!-- Messages will be loaded here -->
+                    </div>
+                    <div class="chat-input-area">
+                        <button class="btn btn-catch-up" id="catch-me-up-btn"><i class="fas fa-bolt"></i> Catch Me Up</button>
+                        <textarea id="chat-input" placeholder="Type your message..."></textarea>
+                        <button class="btn btn-send"><i class="fas fa-paper-plane"></i> Send</button>
+                    </div>
+                </div>
+            </section>
+
+            <section id="dashboard-section" class="content-section">
+                <h3>Group Members & Tasks Overview</h3>
+                <div class="dashboard-grid">
+                    <div class="card member-card">
+                        <h4>Members</h4>
+                        <ul id="member-list">
+                            <!-- Members will be loaded here -->
+                        </ul>
+                    </div>
+                    <div class="card task-overview-card">
+                        <h4>Task Status</h4>
+                        <div class="task-status-chart">
+                            <canvas id="taskStatusChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="card recent-activity-card">
+                        <h4>Recent Activity</h4>
+                        <ul id="recent-activity-list">
+                            <li><strong>Alice Smith</strong> updated task "Research on AI ethics" to "In Progress".</li>
+                            <li><strong>Bob Johnson</strong> added a comment in "UI Design" topic.</li>
+                            <li><strong>Charlie Brown</strong> completed task "Backend database design".</li>
+                            <li><strong>Diana Prince</strong> submitted the project proposal draft.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <section id="heatmap-section" class="content-section">
+                <h3>Deadline Stress Heatmap</h3>
+                <div class="heatmap-controls">
+                    <button class="btn btn-secondary">Previous Week</button>
+                    <span>Week of <span id="current-week-display">March 10, 2026</span></span>
+                    <button class="btn btn-secondary">Next Week</button>
+                </div>
+                <div class="calendar-grid" id="deadline-calendar">
+                    <!-- Calendar will be generated here -->
+                </div>
+                <div class="meeting-suggestion">
+                    <h4>Suggested Meeting Times</h4>
+                    <p id="meeting-suggestion-text">Looking for low-stress periods...</p>
+                </div>
+            </section>
+
+            <section id="tasks-section" class="content-section">
+                <h3>Task Assignment & Management</h3>
+                <div class="task-assignment-header">
+                    <button class="btn btn-primary add-task-btn"><i class="fas fa-plus"></i> Add New Task</button>
+                    <div class="task-filter">
+                        <label for="task-member-filter">Assigned To:</label>
+                        <select id="task-member-filter">
+                            <option value="all">All Members</option>
+                            <!-- Members will be loaded here -->
+                        </select>
+                        <label for="task-status-filter">Status:</label>
+                        <select id="task-status-filter">
+                            <option value="all">All Statuses</option>
+                            <option value="To Do">To Do</option>
+                            <option value="In Progress">In Progress</option>
+                            <option value="Done">Done</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="task-list" id="task-assignment-list">
+                    <!-- Tasks will be loaded here -->
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        // Mock data from Python execution
+        const MOCK_DATA = {"members": [{"id": "m1", "name": "Alice Smith", "email": "alice@uni.edu", "avatar": "https://i.pravatar.cc/150?img=1"}, {"id": "m2", "name": "Bob Johnson", "email": "bob@uni.edu", "avatar": "https://i.pravatar.cc/150?img=2"}, {"id": "m3", "name": "Charlie Brown", "email": "charlie@uni.edu", "avatar": "https://i.pravatar.cc/150?img=3"}, {"id": "m4", "name": "Diana Prince", "email": "diana@uni.edu", "avatar": "https://i.pravatar.cc/150?img=4"}], "tasks": [{"id": "t1", "member_id": "m1", "description": "Research on AI ethics", "status": "In Progress", "due_date": "2026-03-16"}, {"id": "t2", "member_id": "m2", "description": "Develop UI mockups", "status": "To Do", "due_date": "2026-03-21"}, {"id": "t3", "member_id": "m3", "description": "Backend database design", "status": "Done", "due_date": "2026-03-09"}, {"id": "t4", "member_id": "m4", "description": "Write project proposal", "status": "In Progress", "due_date": "2026-03-26"}, {"id": "t5", "member_id": "m1", "description": "Prepare presentation slides", "status": "To Do", "due_date": "2026-03-31"}, {"id": "t6", "member_id": "m2", "description": "Integrate chat module", "status": "In Progress", "due_date": "2026-03-18"}, {"id": "t7", "member_id": "m3", "description": "Test user authentication", "status": "To Do", "due_date": "2026-03-23"}], "messages": [{"id": "msg1", "topic_id": "t_general", "sender_id": "m1", "timestamp": "2026-03-11T22:58:31.371257", "content": "Hey team, just started on the AI ethics research. Found some interesting articles."}, {"id": "msg2", "topic_id": "t_general", "sender_id": "m2", "timestamp": "2026-03-11T23:03:31.371265", "content": "Great, Alice! I'm sketching out the UI, thinking of a clean Material Design look."}, {"id": "msg3", "topic_id": "t_ui", "sender_id": "m3", "timestamp": "2026-03-11T23:08:31.371268", "content": "Sounds good, Bob. Make sure to consider responsiveness."}, {"id": "msg4", "topic_id": "t_general", "sender_id": "m4", "timestamp": "2026-03-11T23:13:31.371270", "content": "I'll review the project proposal template today. Anyone have specific points to highlight?"}, {"id": "msg5", "topic_id": "t_ai_ethics", "sender_id": "m1", "timestamp": "2026-03-11T23:18:31.371273", "content": "Reply to Alice: I think focusing on data privacy and bias in algorithms would be crucial for AI ethics."}, {"id": "msg6", "topic_id": "t_ui", "sender_id": "m2", "timestamp": "2026-03-11T23:23:31.371275", "content": "Reply to Bob: Definitely, Charlie! I'm using flexbox for layout, should handle various screen sizes."}, {"id": "msg7", "topic_id": "t_general", "sender_id": "m1", "timestamp": "2026-03-11T23:28:31.371277", "content": "Quick check-in, how's everyone's progress?"}, {"id": "msg8", "topic_id": "t_proposal", "sender_id": "m4", "timestamp": "2026-03-11T23:33:31.371279", "content": "Reply to Diana: For the proposal, we should emphasize the innovative aspects of our stress heatmap."}, {"id": "msg9", "topic_id": "t_ai_ethics", "sender_id": "m3", "timestamp": "2026-03-11T23:38:31.371282", "content": "Reply to Alice: Agreed, Alice. Ethical considerations are key in any modern AI system."}, {"id": "msg10", "topic_id": "t_general", "sender_id": "m2", "timestamp": "2026-03-11T23:43:31.371284", "content": "All good here, making steady progress on the UI!"}], "heatmap_deadlines": [{"member_id": "m1", "date": "2026-03-09", "workload": "high"}, {"member_id": "m1", "date": "2026-03-16", "workload": "medium"}, {"member_id": "m2", "date": "2026-02-14", "workload": "medium"}, {"member_id": "m2", "date": "2026-03-28", "workload": "low"}, {"member_id": "m3", "date": "2026-03-28", "workload": "high"}, {"member_id": "m3", "date": "2026-02-25", "workload": "high"}, {"member_id": "m4", "date": "2026-03-17", "workload": "medium"}, {"member_id": "m4", "date": "2026-02-19", "workload": "low"}]}
+    </script>
+    <script src="code.js"></script>
+</body>
+</html>
