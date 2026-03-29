@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UniGroup Hub</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div>
+        <div class="brand">
+          <div class="brand-badge">U</div>
+          <div>
+            <h1>UniGroup Hub</h1>
+            <p>Assignment collaboration</p>
+          </div>
+        </div>
+
+        <nav class="nav-links">
+          <button class="nav-link active" data-section="dashboard">Dashboard</button>
+          <button class="nav-link" data-section="chat">Group Chat</button>
+          <button class="nav-link" data-section="heatmap">Stress Heatmap</button>
+          <button class="nav-link" data-section="meeting">Meeting Decider</button>
+          <button class="nav-link" data-section="calls">Scheduled Calls</button>
+          <button class="nav-link" data-section="checklist">Checklist</button>
+          <button class="nav-link" data-section="catchup">Catch Me Up</button>
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <p class="mini-label">Current group</p>
+        <strong id="activeGroupName">INFO2222 Team Alpha</strong>
+        <p class="muted">Front-end prototype with demo data</p>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="page-header">
+        <div>
+          <h2 id="sectionTitle">Dashboard</h2>
+          <p id="sectionSubtitle">Overview of members, workload, and current progress.</p>
+        </div>
+        <div class="header-actions">
+          <button class="secondary-btn" id="openCreateGroup">+ Create Group Chat</button>
+          <button class="primary-btn" id="quickMeetingBtn">Suggest Meeting</button>
+        </div>
+      </header>
+
+      <section id="dashboard" class="section active">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <span>Total members</span>
+            <strong id="statMembers">4</strong>
+          </div>
+          <div class="stat-card">
+            <span>Open tasks</span>
+            <strong id="statTasks">9</strong>
+          </div>
+          <div class="stat-card">
+            <span>Upcoming deadlines</span>
+            <strong id="statDeadlines">5</strong>
+          </div>
+          <div class="stat-card">
+            <span>Best meeting time</span>
+            <strong id="statMeetingTime">Wed 4–5pm</strong>
+          </div>
+        </div>
+
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Group members</h3>
+              <span class="badge">Live sample</span>
+            </div>
+            <div id="memberCards" class="member-grid"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Task snapshot</h3>
+              <span class="badge">This week</span>
+            </div>
+            <div id="taskSnapshot" class="task-snapshot"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="chat" class="section">
+        <div class="grid chat-layout">
+          <div class="card chat-sidebar-card">
+            <div class="card-header">
+              <h3>Group chats</h3>
+              <button class="small-btn" id="openCreateGroupInline">+ New</button>
+            </div>
+            <div id="groupList" class="group-list"></div>
+            <hr />
+            <div class="card-header compact-header">
+              <h3>Topics</h3>
+            </div>
+            <div id="channelList" class="channel-list"></div>
+          </div>
+
+          <div class="card chat-card">
+            <div class="chat-topbar">
+              <div>
+                <h3 id="chatTitle"># General</h3>
+                <p id="chatGroupLabel" class="muted">INFO2222 Team Alpha</p>
+              </div>
+              <span class="badge" id="messageCountBadge">0 messages</span>
+            </div>
+            <div id="chatMessages" class="chat-messages"></div>
+            <form id="chatForm" class="chat-input-row">
+              <input id="chatInput" type="text" placeholder="Type a message..." />
+              <button class="primary-btn" type="submit">Send</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section id="heatmap" class="section">
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Deadline stress heatmap</h3>
+              <span class="badge">Green / Yellow / Red</span>
+            </div>
+            <div id="heatmapCalendar" class="heatmap-calendar"></div>
+            <div class="legend">
+              <span><i class="legend-box low"></i> Low workload</span>
+              <span><i class="legend-box medium"></i> Moderate</span>
+              <span><i class="legend-box high"></i> High stress</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Clash insights</h3>
+              <span class="badge">Auto analysis</span>
+            </div>
+            <div id="clashInsights" class="insight-list"></div>
+          </div>
+        </div>
+
+        <div class="card space-top">
+          <div class="card-header">
+            <h3>Member timetable / workload view</h3>
+            <span class="badge">Keep track of each other</span>
+          </div>
+          <div id="memberTimetables" class="timetable-list"></div>
+        </div>
+      </section>
+
+      <section id="meeting" class="section">
+        <div class="grid two-col meeting-grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Meeting time decider</h3>
+              <span class="badge">Mark free slots</span>
+            </div>
+            <div class="meeting-controls">
+              <label>
+                Day
+                <select id="meetingDaySelect"></select>
+              </label>
+            </div>
+            <div id="availabilityGrid" class="availability-grid"></div>
+            <div class="legend">
+              <span><i class="legend-box selected"></i> Selected by member</span>
+              <span><i class="legend-box overlap"></i> Everyone available</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Automatic decided time</h3>
+              <span class="badge">Monthly + Daily</span>
+            </div>
+            <div id="monthlyView" class="monthly-view"></div>
+            <div class="decision-box">
+              <p class="muted">Suggested time</p>
+              <h2 id="suggestedMeeting">Wednesday 4:00pm – 5:00pm</h2>
+              <div class="decision-actions">
+                <button class="danger-btn" id="rejectMeeting">Reject</button>
+                <button class="success-btn" id="confirmMeeting">Confirm</button>
+              </div>
+              <p id="meetingFeedback" class="feedback-text"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="calls" class="section">
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Initializer / scheduled calls</h3>
+              <span class="badge">Upcoming calls</span>
+            </div>
+            <div id="scheduledCalls" class="call-list"></div>
+
+            <form id="callForm" class="stack-form">
+              <h4>Schedule a new call</h4>
+              <input id="callTitle" type="text" placeholder="Call title" required />
+              <input id="callDate" type="date" required />
+              <input id="callTime" type="time" required />
+              <button class="primary-btn" type="submit">Add to calendar</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Reminder settings</h3>
+              <span class="badge">Customise</span>
+            </div>
+            <div class="setting-row">
+              <label>Initiate conversation after</label>
+              <select id="initiateConversationSelect">
+                <option>1 day</option>
+                <option selected>2 days</option>
+                <option>3 days</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label>Remind task deadline ahead</label>
+              <select id="deadlineReminderSelect">
+                <option>2 days</option>
+                <option selected>3 days</option>
+                <option>4 days</option>
+              </select>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" checked id="summaryToggle" /> Summarise discussion at the end of the day</label>
+            <label class="checkbox-row"><input type="checkbox" checked id="imbalanceToggle" /> Remind members about progress imbalance</label>
+            <label class="checkbox-row"><input type="checkbox" checked id="applaudToggle" /> Applaud good progress</label>
+            <div class="call-calendar-wrapper">
+              <h4>Calendar view</h4>
+              <div id="callCalendar" class="call-calendar"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="checklist" class="section">
+        <div class="grid two-col tasks-grid">
+          <div class="card">
+            <div class="card-header">
+              <h3>Add task</h3>
+              <span class="badge">Assign work</span>
+            </div>
+            <form id="taskForm" class="stack-form">
+              <input id="taskTitle" type="text" placeholder="Task title" required />
+              <div class="form-row">
+                <select id="taskAssignee"></select>
+                <select id="taskPriority">
+                  <option value="Low">Low priority</option>
+                  <option value="Medium" selected>Medium priority</option>
+                  <option value="High">High priority</option>
+                </select>
+              </div>
+              <input id="taskDeadline" type="date" required />
+              <button class="primary-btn" type="submit">Create task</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Checklist</h3>
+              <span class="badge">Mark items complete</span>
+            </div>
+            <div id="checklistItems" class="checklist"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="catchup" class="section">
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Catch Me Up</h3>
+              <span class="badge">Recent summary</span>
+            </div>
+            <div class="stack-form">
+              <select id="catchupMember"></select>
+              <button class="primary-btn" id="generateCatchup">Generate catch-up summary</button>
+            </div>
+            <div id="catchupSummary" class="catchup-summary"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Relevant recent updates</h3>
+              <span class="badge">Mock AI logic</span>
+            </div>
+            <div id="recentHighlights" class="insight-list"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal hidden" id="groupModal">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3>Create a group chat</h3>
+        <button class="icon-btn" id="closeGroupModal">✕</button>
+      </div>
+      <form id="groupForm" class="stack-form">
+        <input id="groupNameInput" type="text" placeholder="Group name" required />
+        <input id="groupTopicInput" type="text" placeholder="First topic/channel (e.g. General)" required />
+        <button class="primary-btn" type="submit">Create group</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
