@@ -51,32 +51,23 @@ const appData = {
       ]
     }
   ],
-  heatmap: [
-    { day: 'Mon', date: 1, level: 'low', label: '1 due' },
-    { day: 'Tue', date: 2, level: 'medium', label: '2 due' },
-    { day: 'Wed', date: 3, level: 'high', label: 'clash' },
-    { day: 'Thu', date: 4, level: 'medium', label: 'busy' },
-    { day: 'Fri', date: 5, level: 'low', label: 'free' },
-    { day: 'Sat', date: 6, level: 'low', label: 'free' },
-    { day: 'Sun', date: 7, level: 'medium', label: 'prep' },
-    { day: 'Mon', date: 8, level: 'high', label: '3 deadlines' },
-    { day: 'Tue', date: 9, level: 'high', label: 'report + code' },
-    { day: 'Wed', date: 10, level: 'medium', label: 'call day' },
-    { day: 'Thu', date: 11, level: 'low', label: 'free' },
-    { day: 'Fri', date: 12, level: 'medium', label: 'review' },
-    { day: 'Sat', date: 13, level: 'low', label: 'free' },
-    { day: 'Sun', date: 14, level: 'low', label: 'free' }
+  /** Mon=0 … Sun=6 — nearest task due day this week (matches demo sketch) */
+  heatmapMembers: [
+    { name: 'Ava', dueWeekday: 4 },
+    { name: 'Ben', dueWeekday: 3 },
+    { name: 'Chloe', dueWeekday: 1 },
+    { name: 'Daniel', dueWeekday: 6 }
   ],
   scheduledCalls: [
     { id: 1, title: 'Weekly stand-up', date: '2026-04-03', time: '16:00' },
     { id: 2, title: 'Prototype review', date: '2026-04-06', time: '18:00' }
   ],
   tasks: [
-    { id: 1, title: 'Build sidebar navigation', assignee: 'Ben', deadline: '2026-04-03', priority: 'High', stage: 'Done' },
-    { id: 2, title: 'Write stress heatmap explanation', assignee: 'Chloe', deadline: '2026-04-06', priority: 'Medium', stage: 'To Do' },
-    { id: 3, title: 'Meeting overlap logic', assignee: 'Daniel', deadline: '2026-04-05', priority: 'High', stage: 'In Progress' },
-    { id: 4, title: 'Prepare tutor demo script', assignee: 'Ava', deadline: '2026-04-07', priority: 'Medium', stage: 'Review' },
-    { id: 5, title: 'Task panel polish', assignee: 'Ben', deadline: '2026-04-08', priority: 'Low', stage: 'In Progress' }
+    { id: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
+    { id: 2, title: 'Testing', assignee: 'Ben', priorityRank: 2, durationDays: 3, status: 'In Progress' },
+    { id: 3, title: 'Building Framework', assignee: 'Chloe', priorityRank: 3, durationDays: 2, status: 'Not Started' },
+    { id: 4, title: 'Marketing', assignee: 'N/A', priorityRank: 4, durationDays: 2, status: 'Not Assigned' },
+    { id: 5, title: 'Task panel polish', assignee: 'Ben', priorityRank: 4, durationDays: 1, status: 'In Progress' }
   ],
   availability: {
     Wednesday: {
@@ -104,13 +95,22 @@ let activeSection = 'dashboard';
 let activeGroupId = 1;
 let activeChannelId = 'general';
 
+const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
+
+let checklistSortBy = 'priority';
+let checklistSortAscending = true;
+let checklistStatusFilter = null;
+let checklistFilterMenuOpen = false;
+let meetingEditMode = false;
+const editableMeetingMember = 'You';
+
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
   chat: ['Group Chat', 'Create groups, switch channels, and follow topic-based discussions.'],
   heatmap: ['Stress Heatmap', 'See deadlines, clashes, and low-stress periods for meetings.'],
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
   calls: ['Scheduled Calls', 'Initialize calls, reminders, and calendar-based meeting setup.'],
-  checklist: ['Checklist', 'Add tasks and tick them off when they are done.'],
+  checklist: ['To-Do List', 'Priority, duration, status, sort, and filter.'],
   catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.']
 };
 
@@ -124,13 +124,17 @@ function $all(selector) {
 }
 
 function init() {
+  ensureEditableMeetingMember();
   bindNavigation();
+  bindAddDeadlineModal();
   bindChat();
   bindMeeting();
   bindCalls();
   bindTasks();
+  bindChecklistControls();
   bindCatchup();
   bindGroupModal();
+  startSidebarClock();
   renderAll();
 }
 
@@ -153,11 +157,31 @@ function bindNavigation() {
       $all('.section').forEach(sec => sec.classList.toggle('active', sec.id === section));
       $('#sectionTitle').textContent = sectionsMeta[section][0];
       $('#sectionSubtitle').textContent = sectionsMeta[section][1];
+      syncPageMeetingBox();
     });
   });
+  syncPageMeetingBox();
+}
 
-  $('#quickMeetingBtn').addEventListener('click', () => {
-    document.querySelector('[data-section="meeting"]').click();
+function bindAddDeadlineModal() {
+  $('#addDeadlineWeekday').innerHTML = WEEKDAYS.map((d, i) => `<option value="${i}">${d}</option>`).join('');
+  $('#addMyDeadlineBtn').addEventListener('click', () => {
+    $('#addDeadlineModal').classList.remove('hidden');
+  });
+  $('#closeAddDeadlineModal').addEventListener('click', () => {
+    $('#addDeadlineModal').classList.add('hidden');
+  });
+  $('#addDeadlineModal').addEventListener('click', e => {
+    if (e.target.id === 'addDeadlineModal') $('#addDeadlineModal').classList.add('hidden');
+  });
+  $('#addDeadlineForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const due = Number($('#addDeadlineWeekday').value);
+    const idx = appData.heatmapMembers.findIndex(m => m.name === 'Me');
+    if (idx >= 0) appData.heatmapMembers[idx].dueWeekday = due;
+    else appData.heatmapMembers.push({ name: 'Me', dueWeekday: due });
+    $('#addDeadlineModal').classList.add('hidden');
+    renderHeatmap();
   });
 }
 
@@ -168,7 +192,7 @@ function workloadClass(level) {
 function renderDashboard() {
   $('#statMembers').textContent = appData.members.length;
   $('#statTasks').textContent = appData.tasks.length;
-  $('#statDeadlines').textContent = appData.tasks.filter(t => t.stage !== 'Done').length;
+  $('#statDeadlines').textContent = appData.tasks.filter(t => t.status !== 'Done').length;
   $('#statMeetingTime').textContent = computeSuggestedMeeting().label;
 
   $('#memberCards').innerHTML = appData.members.map(member => `
@@ -192,8 +216,8 @@ function renderDashboard() {
   $('#taskSnapshot').innerHTML = appData.tasks.slice(0, 5).map(task => `
     <div class="snapshot-item">
       <strong>${task.title}</strong>
-      <p class="muted">${task.assignee} · ${task.stage} · ${task.priority} priority</p>
-      <small>Deadline: ${formatShortDate(task.deadline)}</small>
+      <p class="muted">${task.assignee} · ${task.status} · P${task.priorityRank}</p>
+      <small>Duration: ${task.durationDays} days</small>
     </div>
   `).join('');
 }
@@ -207,7 +231,6 @@ function getActiveChannel() {
 
 function renderChat() {
   const activeGroup = getActiveGroup();
-  $('#activeGroupName').textContent = activeGroup.name;
 
   $('#groupList').innerHTML = appData.groups.map(group => `
     <button class="group-item ${group.id === activeGroupId ? 'active' : ''}" data-group-id="${group.id}">
@@ -262,21 +285,48 @@ function bindChat() {
   });
 }
 
-function renderHeatmap() {
-  $('#heatmapCalendar').innerHTML = appData.heatmap.map(item => `
-    <div class="heat-day heat-${item.level}">
-      <strong>${item.day} ${item.date}</strong>
-      <span class="muted">${item.label}</span>
-    </div>
-  `).join('');
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-  const highDays = appData.heatmap.filter(d => d.level === 'high');
-  const mediumDays = appData.heatmap.filter(d => d.level === 'medium');
-  $('#clashInsights').innerHTML = `
-    <div class="insight-item"><strong>High-stress days:</strong> ${highDays.map(d => `${d.day} ${d.date}`).join(', ')}</div>
-    <div class="insight-item"><strong>Moderate workload:</strong> ${mediumDays.length} days need earlier check-ins.</div>
-    <div class="insight-item"><strong>Meeting suggestion:</strong> ${computeSuggestedMeeting().label} is currently the lowest-stress overlap.</div>
-    <div class="insight-item"><strong>Deadline clash:</strong> Week 2 has multiple overlapping report and coding deadlines.</div>
+/** Days until due from this weekday (same week). Blue ≥4 days away, yellow 1–3 days, due = red, after due = free. */
+function heatmapDayState(dueWeekday, dayIndex) {
+  const daysUntil = dueWeekday - dayIndex;
+  if (daysUntil < 0) return 'free';
+  if (daysUntil === 0) return 'due';
+  if (daysUntil >= 4) return 'far';
+  return 'urgent';
+}
+
+function renderHeatmap() {
+  const headerCells = WEEKDAYS.map(d => `<div class="heatmap-head">${d}</div>`).join('');
+  const rows = appData.heatmapMembers.map(member => {
+    const cells = WEEKDAYS.map((_, dayIndex) => {
+      const state = heatmapDayState(member.dueWeekday, dayIndex);
+      if (state === 'free') {
+        return '<div class="heatmap-cell heatmap-free" title="Free from tasks"><span class="heatmap-check">✓</span></div>';
+      }
+      if (state === 'due') {
+        return '<div class="heatmap-cell heatmap-urgent heatmap-due" title="Due date"></div>';
+      }
+      if (state === 'far') {
+        return '<div class="heatmap-cell heatmap-far" title="Task due in more than 3 days"></div>';
+      }
+      return '<div class="heatmap-cell heatmap-urgent" title="Due within 3 days"></div>';
+    }).join('');
+    return `
+      <div class="heatmap-row">
+        <div class="heatmap-member">${member.name}</div>
+        ${cells}
+      </div>`;
+  }).join('');
+
+  $('#heatmapCalendar').innerHTML = `
+    <div class="heatmap-table">
+      <div class="heatmap-row heatmap-row-head">
+        <div class="heatmap-corner muted">Member</div>
+        ${headerCells}
+      </div>
+      ${rows}
+    </div>
   `;
 
   $('#memberTimetables').innerHTML = appData.members.map(member => {
@@ -305,40 +355,62 @@ function bindMeeting() {
   });
 
   $('#meetingDaySelect').addEventListener('change', renderAvailabilityGrid);
+  $('#toggleFreeSlotsBtn').addEventListener('click', () => {
+    meetingEditMode = !meetingEditMode;
+    syncMeetingEditState();
+    renderAvailabilityGrid();
+  });
+  $('#availabilityGrid').addEventListener('click', e => {
+    const cell = e.target.closest('.availability-cell.editable-cell');
+    if (!cell || !meetingEditMode) return;
+
+    const day = $('#meetingDaySelect').value || Object.keys(appData.availability)[0];
+    const slot = cell.dataset.slot;
+    const slots = appData.availability[day][editableMeetingMember];
+    const nextSlots = slots.includes(slot)
+      ? slots.filter(value => value !== slot)
+      : [...slots, slot].sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
+
+    appData.availability[day][editableMeetingMember] = nextSlots;
+    $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
+    renderAvailabilityGrid();
+  });
 }
 
 function renderMeeting() {
   const days = Object.keys(appData.availability);
+  const currentDay = $('#meetingDaySelect').value;
   $('#meetingDaySelect').innerHTML = days.map(day => `<option value="${day}">${day}</option>`).join('');
+  $('#meetingDaySelect').value = days.includes(currentDay) ? currentDay : days[0];
   renderAvailabilityGrid();
-
-  $('#monthlyView').innerHTML = [1,2,3,4,5,6,7,8,9,10,11,12,13,14].map(day => {
-    const freeDays = [3,5,8,10,12];
-    return `<div class="month-cell ${freeDays.includes(day) ? 'free-day' : ''}"><strong>${day}</strong>${freeDays.includes(day) ? '<div class="muted">Everyone free</div>' : '<div class="muted">Partial overlap</div>'}</div>`;
-  }).join('');
-
-  const suggestion = computeSuggestedMeeting();
-  $('#suggestedMeeting').textContent = suggestion.labelFull;
+  syncMeetingEditState();
 }
 
 function renderAvailabilityGrid() {
   const day = $('#meetingDaySelect').value || Object.keys(appData.availability)[0];
   const dayData = appData.availability[day];
-  const memberNames = Object.keys(dayData);
+  const memberNames = Object.keys(dayData).sort((a, b) => {
+    if (a === editableMeetingMember) return 1;
+    if (b === editableMeetingMember) return -1;
+    return 0;
+  });
   const overlaps = timeSlots.filter(slot => memberNames.every(name => dayData[name].includes(slot)));
 
-  let html = `<div class="availability-header"><div class="availability-cell member-label">Member</div>${timeSlots.map(slot => `<div class="availability-cell">${slot}</div>`).join('')}</div>`;
+  let html = `<div class="availability-header"><div class="availability-cell member-label">Member</div>${timeSlots.map(slot => `<div class="availability-cell">${slotStartLabel(slot)}</div>`).join('')}</div>`;
   html += memberNames.map(name => `
-    <div class="availability-row">
+    <div class="availability-row ${name === editableMeetingMember ? 'editable-member-row' : ''}">
       <div class="availability-cell member-label">${name}</div>
       ${timeSlots.map(slot => {
         const isSelected = dayData[name].includes(slot);
         const isOverlap = overlaps.includes(slot);
-        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''}">${isOverlap ? '✓' : isSelected ? '•' : ''}</div>`;
+        const isEditable = name === editableMeetingMember && meetingEditMode;
+        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''} ${isEditable ? 'editable-cell' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
       }).join('')}
     </div>
   `).join('');
   $('#availabilityGrid').innerHTML = html;
+  $('#availabilityGrid').classList.toggle('is-editing', meetingEditMode);
+  updateMeetingSuggestion();
 }
 
 function computeSuggestedMeeting() {
@@ -354,6 +426,27 @@ function computeSuggestedMeeting() {
     label: `${best.day} ${slotToReadable(best.slot)}`,
     labelFull: `${best.day} ${slotToReadable(best.slot, true)}`
   };
+}
+
+function ensureEditableMeetingMember() {
+  Object.values(appData.availability).forEach(dayData => {
+    if (!dayData[editableMeetingMember]) dayData[editableMeetingMember] = [];
+  });
+}
+
+function syncMeetingEditState() {
+  $('#toggleFreeSlotsBtn').classList.toggle('active', meetingEditMode);
+  $('#toggleFreeSlotsBtn').textContent = meetingEditMode ? 'Done marking slots' : 'Mark your free slots';
+  $('#meetingEditHint').classList.toggle('visible', meetingEditMode);
+}
+
+function updateMeetingSuggestion() {
+  const suggestion = computeSuggestedMeeting();
+  $('#suggestedMeeting').textContent = suggestion.labelFull;
+}
+
+function syncPageMeetingBox() {
+  $('#pageMeetingBox').classList.toggle('hidden', activeSection !== 'meeting');
 }
 
 function bindCalls() {
@@ -403,20 +496,89 @@ function renderCalls() {
 }
 
 function bindTasks() {
-  $('#taskAssignee').innerHTML = appData.members.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+  $('#taskAssignee').innerHTML = '<option value="N/A">N/A</option>' + appData.members.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
   $('#taskForm').addEventListener('submit', e => {
     e.preventDefault();
+    const assignee = $('#taskAssignee').value;
     appData.tasks.push({
       id: Date.now(),
       title: $('#taskTitle').value.trim(),
-      assignee: $('#taskAssignee').value,
-      priority: $('#taskPriority').value,
-      deadline: $('#taskDeadline').value,
-      stage: 'To Do'
+      assignee,
+      priorityRank: Number($('#taskPriority').value),
+      durationDays: Math.max(1, Number($('#taskDuration').value) || 1),
+      status: assignee === 'N/A' ? 'Not Assigned' : 'Not Started'
     });
     e.target.reset();
+    $('#taskPriority').value = '3';
+    $('#taskDuration').value = '3';
     renderTasks();
     renderDashboard();
+  });
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;');
+}
+
+function statusSlug(status) {
+  return status.toLowerCase().replace(/\s+/g, '-');
+}
+
+function priorityPillClass(rank) {
+  if (rank <= 2) return 'priority-pill-urgent';
+  if (rank === 3) return 'priority-pill-mid';
+  return 'priority-pill-low';
+}
+
+function bindChecklistControls() {
+  const root = $('#checklistItems');
+  root.addEventListener('click', e => {
+    e.stopPropagation();
+    const sortPri = e.target.closest('[data-action="sort-priority"]');
+    if (sortPri) {
+      if (checklistSortBy === 'priority') checklistSortAscending = !checklistSortAscending;
+      else {
+        checklistSortBy = 'priority';
+        checklistSortAscending = true;
+      }
+      checklistFilterMenuOpen = false;
+      renderTasks();
+      return;
+    }
+    const sortDur = e.target.closest('[data-action="sort-duration"]');
+    if (sortDur) {
+      if (checklistSortBy === 'duration') checklistSortAscending = !checklistSortAscending;
+      else {
+        checklistSortBy = 'duration';
+        checklistSortAscending = true;
+      }
+      checklistFilterMenuOpen = false;
+      renderTasks();
+      return;
+    }
+    const filterBtn = e.target.closest('[data-action="toggle-status-filter"]');
+    if (filterBtn) {
+      checklistFilterMenuOpen = !checklistFilterMenuOpen;
+      renderTasks();
+      return;
+    }
+    const filterOpt = e.target.closest('[data-action="set-status-filter"]');
+    if (filterOpt) {
+      const v = filterOpt.dataset.filterValue;
+      checklistStatusFilter = v === 'all' ? null : v;
+      checklistFilterMenuOpen = false;
+      renderTasks();
+      return;
+    }
+  });
+  document.addEventListener('click', () => {
+    if (checklistFilterMenuOpen) {
+      checklistFilterMenuOpen = false;
+      renderTasks();
+    }
   });
 }
 
@@ -427,31 +589,98 @@ function renderTasks() {
     return;
   }
 
-  container.innerHTML = appData.tasks
+  const filtered = appData.tasks.filter(t => checklistStatusFilter === null || t.status === checklistStatusFilter);
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp = 0;
+    if (checklistSortBy === 'priority') {
+      cmp = a.priorityRank - b.priorityRank;
+      if (cmp === 0) cmp = a.durationDays - b.durationDays;
+    } else {
+      cmp = a.durationDays - b.durationDays;
+      if (cmp === 0) cmp = a.priorityRank - b.priorityRank;
+    }
+    const dir = checklistSortAscending ? 1 : -1;
+    return cmp * dir;
+  });
+
+  const caretPri = checklistSortBy === 'priority' ? (checklistSortAscending ? '▲' : '▼') : '';
+  const caretDur = checklistSortBy === 'duration' ? (checklistSortAscending ? '▲' : '▼') : '';
+  const filterSelected = f =>
+    (f.value === 'all' && checklistStatusFilter === null) ||
+    (f.value !== 'all' && checklistStatusFilter === f.value);
+
+  const filterButtons = [
+    { value: 'all', label: 'All statuses' },
+    { value: 'Done', label: 'Done' },
+    { value: 'In Progress', label: 'In Progress' },
+    { value: 'Not Started', label: 'Not Started' },
+    { value: 'Not Assigned', label: 'Not Assigned' }
+  ]
+    .map(
+      f => `
+      <button type="button" class="checklist-filter-option" data-action="set-status-filter" data-filter-value="${f.value}">
+        ${f.label}${filterSelected(f) ? ' ✓' : ''}
+      </button>`
+    )
+    .join('');
+
+  const rows = sorted
     .map(task => {
-      const done = task.stage === 'Done';
-      const statusLabel = done ? '' : task.stage !== 'To Do' ? `<span class="task-tag">${task.stage}</span>` : '';
+      const assigneeClass = task.assignee === 'N/A' ? 'checklist-assignee-na' : 'checklist-assignee';
+      const statusOpts = TASK_STATUSES.map(
+        s => `<option value="${s}" ${task.status === s ? 'selected' : ''}>${s}</option>`
+      ).join('');
       return `
-    <label class="checklist-item${done ? ' is-done' : ''}">
-      <input type="checkbox" data-task-id="${task.id}" ${done ? 'checked' : ''} />
-      <span class="checklist-body">
-        <strong class="checklist-title">${task.title}</strong>
-        <span class="checklist-meta">
-          <span class="task-tag">${task.assignee}</span>
-          <span class="task-tag">${task.priority}</span>
-          <span class="task-tag">${formatShortDate(task.deadline)}</span>
-          ${statusLabel}
-        </span>
-      </span>
-    </label>`;
+      <tr>
+        <td class="checklist-col-task">${escapeHtml(task.title)}</td>
+        <td class="checklist-col-pri"><span class="priority-pill ${priorityPillClass(task.priorityRank)}">${task.priorityRank}</span></td>
+        <td class="${assigneeClass}">${task.assignee}</td>
+        <td class="checklist-duration">${task.durationDays} days</td>
+        <td class="checklist-col-status"><select class="checklist-status-select checklist-status-${statusSlug(task.status)}" data-task-id="${task.id}">${statusOpts}</select></td>
+      </tr>`;
     })
     .join('');
 
-  $all('#checklistItems input[type="checkbox"]').forEach(cb => {
-    cb.addEventListener('change', () => {
-      const task = appData.tasks.find(t => t.id === Number(cb.dataset.taskId));
+  const tbodyHtml = sorted.length
+    ? rows
+    : '<tr><td colspan="5" class="checklist-empty-row muted">No tasks match this status filter.</td></tr>';
+
+  container.innerHTML = `
+    <div class="checklist-table-scroll">
+      <table class="checklist-table">
+        <thead>
+          <tr>
+            <th scope="col">Task</th>
+            <th scope="col">
+              <button type="button" class="checklist-th-btn" data-action="sort-priority" title="Click to sort by priority">
+                Priority <span class="sort-caret" aria-hidden="true">${caretPri}</span>
+              </button>
+            </th>
+            <th scope="col">Assigned to</th>
+            <th scope="col">
+              <button type="button" class="checklist-th-btn" data-action="sort-duration" title="Click to sort by duration">
+                Duration <span class="sort-caret" aria-hidden="true">${caretDur}</span>
+              </button>
+            </th>
+            <th scope="col" class="checklist-th-filter">
+              <button type="button" class="checklist-th-btn checklist-th-filter-btn" data-action="toggle-status-filter" title="Click to filter by status">
+                Status <span class="filter-icon" aria-hidden="true">▽</span>
+              </button>
+              ${checklistFilterMenuOpen ? `<div class="checklist-filter-popover">${filterButtons}</div>` : ''}
+            </th>
+          </tr>
+        </thead>
+        <tbody>${tbodyHtml}</tbody>
+      </table>
+    </div>
+    <div class="checklist-scroll-hint" aria-hidden="true">⋮</div>
+  `;
+
+  $all('#checklistItems .checklist-status-select').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const task = appData.tasks.find(t => t.id === Number(sel.dataset.taskId));
       if (!task) return;
-      task.stage = cb.checked ? 'Done' : 'To Do';
+      task.status = sel.value;
       renderTasks();
       renderDashboard();
     });
@@ -465,13 +694,13 @@ function bindCatchup() {
 
 function renderCatchupSummary() {
   const member = $('#catchupMember').value;
-  const taskItems = appData.tasks.filter(t => t.assignee === member || t.stage !== 'Done').slice(0, 3);
+  const taskItems = appData.tasks.filter(t => t.assignee === member || t.status !== 'Done').slice(0, 3);
   const meeting = computeSuggestedMeeting();
   $('#catchupSummary').innerHTML = `
     <div class="summary-card">
       <h4>Catch-up for ${member}</h4>
       <p>Recent discussion focused on finalising the prototype layout, confirming the heatmap feature, and preparing a tutor demo.</p>
-      <p><strong>Important task updates:</strong> ${taskItems.map(t => `${t.title} (${t.stage})`).join(', ')}.</p>
+      <p><strong>Important task updates:</strong> ${taskItems.map(t => `${t.title} (${t.status})`).join(', ')}.</p>
       <p><strong>Upcoming meeting:</strong> ${meeting.labelFull} is currently the best suggested slot.</p>
       <p><strong>Deadline watch:</strong> Multiple members have overlapping report and coding deadlines this week.</p>
     </div>
@@ -488,7 +717,7 @@ function renderCatchupHighlights() {
 }
 
 function bindGroupModal() {
-  const openers = ['#openCreateGroup', '#openCreateGroupInline'];
+  const openers = ['#openCreateGroupInline'];
   openers.forEach(id => $(id).addEventListener('click', () => $('#groupModal').classList.remove('hidden')));
   $('#closeGroupModal').addEventListener('click', () => $('#groupModal').classList.add('hidden'));
   $('#groupModal').addEventListener('click', e => {
@@ -529,11 +758,38 @@ function slotToReadable(slot, long = false) {
   const e = readableHour(end);
   return long ? `${s} – ${e}` : `${s}–${e}`;
 }
+function slotStartLabel(slot) {
+  const [start] = slot.split('-');
+  return readableHour(start).replace(':00', '');
+}
 function readableHour(hourText) {
   const hour = Number(hourText);
   const suffix = hour >= 12 ? 'pm' : 'am';
   const display = hour === 12 ? 12 : hour > 12 ? hour - 12 : hour;
   return `${display}:00${suffix}`;
+}
+
+function startSidebarClock() {
+  updateSidebarClock();
+  window.setInterval(updateSidebarClock, 1000);
+}
+
+function updateSidebarClock() {
+  const now = new Date();
+  $('#sidebarClockTime').textContent = new Intl.DateTimeFormat('en-AU', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: 'Australia/Sydney'
+  }).format(now);
+  $('#sidebarClockDate').textContent = new Intl.DateTimeFormat('en-AU', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'Australia/Sydney'
+  }).format(now);
 }
 
 document.addEventListener('DOMContentLoaded', init);

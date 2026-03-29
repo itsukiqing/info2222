@@ -11,7 +11,11 @@
     <aside class="sidebar">
       <div>
         <div class="brand">
-          <div class="brand-badge">U</div>
+          <div class="brand-badge" aria-hidden="true">
+            <span class="brand-ring brand-ring-one"></span>
+            <span class="brand-ring brand-ring-two"></span>
+            <span class="brand-core">UG</span>
+          </div>
           <div>
             <h1>UniGroup Hub</h1>
             <p>Assignment collaboration</p>
@@ -24,15 +28,15 @@
           <button class="nav-link" data-section="heatmap">Stress Heatmap</button>
           <button class="nav-link" data-section="meeting">Meeting Decider</button>
           <button class="nav-link" data-section="calls">Scheduled Calls</button>
-          <button class="nav-link" data-section="checklist">Checklist</button>
+          <button class="nav-link" data-section="checklist">To-Do List</button>
           <button class="nav-link" data-section="catchup">Catch Me Up</button>
         </nav>
-      </div>
-
-      <div class="sidebar-footer">
-        <p class="mini-label">Current group</p>
-        <strong id="activeGroupName">INFO2222 Team Alpha</strong>
-        <p class="muted">Front-end prototype with demo data</p>
+        <div class="sidebar-footer sidebar-clock-panel">
+          <p class="mini-label">Local time</p>
+          <strong id="sidebarClockTime">12:00 PM</strong>
+          <p id="sidebarClockDate" class="sidebar-footer-date">Monday, 30 March 2026</p>
+          <p class="muted">Sydney, Australia</p>
+        </div>
       </div>
     </aside>
 
@@ -42,9 +46,14 @@
           <h2 id="sectionTitle">Dashboard</h2>
           <p id="sectionSubtitle">Overview of members, workload, and current progress.</p>
         </div>
-        <div class="header-actions">
-          <button class="secondary-btn" id="openCreateGroup">+ Create Group Chat</button>
-          <button class="primary-btn" id="quickMeetingBtn">Suggest Meeting</button>
+        <div class="meeting-decision-compact page-meeting-box hidden" id="pageMeetingBox">
+          <p class="muted meeting-decision-label">Suggested time</p>
+          <p class="meeting-suggested-line" id="suggestedMeeting">Wednesday 4:00pm – 5:00pm</p>
+          <div class="decision-actions">
+            <button type="button" class="danger-btn" id="rejectMeeting">Reject</button>
+            <button type="button" class="success-btn" id="confirmMeeting">Confirm</button>
+          </div>
+          <p id="meetingFeedback" class="feedback-text meeting-feedback-inline"></p>
         </div>
       </header>
 
@@ -120,26 +129,19 @@
       </section>
 
       <section id="heatmap" class="section">
-        <div class="grid two-col">
-          <div class="card">
-            <div class="card-header">
+        <div class="card">
+          <div class="card-header heatmap-card-header">
+            <div>
               <h3>Deadline stress heatmap</h3>
-              <span class="badge">Green / Yellow / Red</span>
             </div>
-            <div id="heatmapCalendar" class="heatmap-calendar"></div>
-            <div class="legend">
-              <span><i class="legend-box low"></i> Low workload</span>
-              <span><i class="legend-box medium"></i> Moderate</span>
-              <span><i class="legend-box high"></i> High stress</span>
-            </div>
+            <button class="primary-btn" type="button" id="addMyDeadlineBtn">Add my deadline</button>
           </div>
-
-          <div class="card">
-            <div class="card-header">
-              <h3>Clash insights</h3>
-              <span class="badge">Auto analysis</span>
-            </div>
-            <div id="clashInsights" class="insight-list"></div>
+          <div id="heatmapCalendar" class="heatmap-calendar"></div>
+          <div class="legend heatmap-legend">
+            <span><i class="legend-box legend-due"></i> Due date (red shadow)</span>
+            <span><i class="legend-box legend-far"></i> Task due in more than 3 days</span>
+            <span><i class="legend-box legend-urgent"></i> Due within 3 days (yellow shadow)</span>
+            <span><i class="legend-box legend-free"></i> Free (no upcoming task)</span>
           </div>
         </div>
 
@@ -153,40 +155,24 @@
       </section>
 
       <section id="meeting" class="section">
-        <div class="grid two-col meeting-grid">
-          <div class="card">
-            <div class="card-header">
+        <div class="card meeting-card">
+          <div class="card-header">
+            <div class="meeting-title-block">
               <h3>Meeting time decider</h3>
-              <span class="badge">Mark free slots</span>
-            </div>
-            <div class="meeting-controls">
-              <label>
-                Day
-                <select id="meetingDaySelect"></select>
-              </label>
-            </div>
-            <div id="availabilityGrid" class="availability-grid"></div>
-            <div class="legend">
-              <span><i class="legend-box selected"></i> Selected by member</span>
-              <span><i class="legend-box overlap"></i> Everyone available</span>
             </div>
           </div>
-
-          <div class="card">
-            <div class="card-header">
-              <h3>Automatic decided time</h3>
-              <span class="badge">Monthly + Daily</span>
-            </div>
-            <div id="monthlyView" class="monthly-view"></div>
-            <div class="decision-box">
-              <p class="muted">Suggested time</p>
-              <h2 id="suggestedMeeting">Wednesday 4:00pm – 5:00pm</h2>
-              <div class="decision-actions">
-                <button class="danger-btn" id="rejectMeeting">Reject</button>
-                <button class="success-btn" id="confirmMeeting">Confirm</button>
-              </div>
-              <p id="meetingFeedback" class="feedback-text"></p>
-            </div>
+          <div class="meeting-controls">
+            <label>
+              Day
+              <select id="meetingDaySelect"></select>
+            </label>
+            <button type="button" class="small-btn meeting-edit-toggle" id="toggleFreeSlotsBtn">Mark your free slots</button>
+          </div>
+          <p id="meetingEditHint" class="meeting-edit-hint">Turn this on, then click cells in your row to add or remove free slots.</p>
+          <div id="availabilityGrid" class="availability-grid"></div>
+          <div class="legend">
+            <span><i class="legend-box selected"></i> Selected by member</span>
+            <span><i class="legend-box overlap"></i> Everyone available</span>
           </div>
         </div>
       </section>
@@ -252,23 +238,26 @@
               <input id="taskTitle" type="text" placeholder="Task title" required />
               <div class="form-row">
                 <select id="taskAssignee"></select>
-                <select id="taskPriority">
-                  <option value="Low">Low priority</option>
-                  <option value="Medium" selected>Medium priority</option>
-                  <option value="High">High priority</option>
+                <select id="taskPriority" title="1–2 urgent, 3 medium, 4 low">
+                  <option value="1">Priority 1</option>
+                  <option value="2">Priority 2</option>
+                  <option value="3" selected>Priority 3</option>
+                  <option value="4">Priority 4</option>
                 </select>
               </div>
-              <input id="taskDeadline" type="date" required />
+              <label class="stack-label">Duration (days)
+                <input id="taskDuration" type="number" min="1" max="365" value="3" required />
+              </label>
               <button class="primary-btn" type="submit">Create task</button>
             </form>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <h3>Checklist</h3>
-              <span class="badge">Mark items complete</span>
+              <h3>To-Do List</h3>
+              <span class="badge">Sort &amp; filter</span>
             </div>
-            <div id="checklistItems" class="checklist"></div>
+            <div id="checklistItems" class="checklist checklist-container"></div>
           </div>
         </div>
       </section>
@@ -297,6 +286,21 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div class="modal hidden" id="addDeadlineModal">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3>Add my deadline</h3>
+        <button class="icon-btn" type="button" id="closeAddDeadlineModal" aria-label="Close">✕</button>
+      </div>
+      <form id="addDeadlineForm" class="stack-form">
+        <label class="stack-label">Due day (this week)
+          <select id="addDeadlineWeekday" required></select>
+        </label>
+        <button class="primary-btn" type="submit">Save to heatmap</button>
+      </form>
+    </div>
   </div>
 
   <div class="modal hidden" id="groupModal">
