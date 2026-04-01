@@ -14,25 +14,25 @@ const appData = {
           id: 'general',
           name: 'General',
           messages: [
-            { sender: 'Ava', text: 'Hi team, let’s keep progress updates here.', time: '9:05 AM' },
-            { sender: 'Ben', text: 'I finished the sidebar layout and will push the prototype tonight.', time: '9:20 AM' },
-            { sender: 'Chloe', text: 'Please remember the tutor wants the heatmap visible in the demo.', time: '10:02 AM' }
+            { sender: 'Ava', text: 'Hi team, let’s keep progress updates here.', time: '9:05 AM', date: '2026-04-01' },
+            { sender: 'Ben', text: '@You can you review the group chat spacing after lunch?', time: '9:20 AM', date: '2026-04-01' },
+            { sender: 'Chloe', text: 'Please remember the tutor wants the heatmap visible in the demo.', time: '10:02 AM', date: '2026-04-01' }
           ]
         },
         {
           id: 'meeting',
           name: 'Meeting Planning',
           messages: [
-            { sender: 'Daniel', text: 'Wednesday 4pm–5pm seems the lowest-stress slot for everyone.', time: '11:15 AM' },
-            { sender: 'Ava', text: 'Great, let’s confirm that after the report outline is done.', time: '11:18 AM' }
+            { sender: 'Daniel', text: 'Wednesday 4pm–5pm seems the lowest-stress slot for everyone.', time: '11:15 AM', date: '2026-04-01' },
+            { sender: 'Ava', text: '@You if the reminder panel is ready, we can demo this flow today.', time: '11:18 AM', date: '2026-04-01' }
           ]
         },
         {
           id: 'coding',
           name: 'Coding',
           messages: [
-            { sender: 'Ben', text: 'I’m building the group chat tab first, then the task board.', time: '12:11 PM' },
-            { sender: 'Daniel', text: 'I’ll handle the meeting overlap logic and scheduled calls.', time: '12:30 PM' }
+            { sender: 'Ben', text: 'I’m building the group chat tab first, then the task board.', time: '12:11 PM', date: '2026-04-01' },
+            { sender: 'Daniel', text: '@You please fake a short daily summary block for today so we can wire AI later.', time: '12:30 PM', date: '2026-04-01' }
           ]
         }
       ]
@@ -45,7 +45,25 @@ const appData = {
           id: 'general-2',
           name: 'General',
           messages: [
-            { sender: 'Mia', text: 'Prototype notes are in the shared doc.', time: '8:30 AM' }
+            { sender: 'Mia', text: 'Prototype notes are in the shared doc.', time: '8:30 AM', date: '2026-03-31' },
+            { sender: 'Noah', text: '@You could you share your reminder flow mock after studio?', time: '4:40 PM', date: '2026-04-01' },
+            { sender: 'Mia', text: 'We should lock the sensor dashboard colours before tomorrow.', time: '5:10 PM', date: '2026-04-01' }
+          ]
+        },
+        {
+          id: 'testing-2',
+          name: 'Testing',
+          messages: [
+            { sender: 'Ivy', text: 'I found two issues in the prototype export flow and added them to the sheet.', time: '10:15 AM', date: '2026-04-01' },
+            { sender: 'Noah', text: 'I can fix the onboarding copy tonight if everyone is happy with the current flow.', time: '11:45 AM', date: '2026-04-01' }
+          ]
+        },
+        {
+          id: 'presentation-2',
+          name: 'Presentation',
+          messages: [
+            { sender: 'Mia', text: '@You please bring the reminder mock into the final slide deck.', time: '1:20 PM', date: '2026-04-01' },
+            { sender: 'Ivy', text: 'I drafted a shorter walkthrough so the final demo stays under five minutes.', time: '2:05 PM', date: '2026-04-01' }
           ]
         }
       ]
@@ -102,6 +120,7 @@ let checklistSortAscending = true;
 let checklistStatusFilter = null;
 let checklistFilterMenuOpen = false;
 let meetingEditMode = false;
+let activeChatUtility = 'chat';
 const editableMeetingMember = 'You';
 
 const sectionsMeta = {
@@ -109,7 +128,7 @@ const sectionsMeta = {
   chat: ['Group Chat', 'Create groups, switch channels, and follow topic-based discussions.'],
   heatmap: ['Stress Heatmap', 'See deadlines, clashes, and low-stress periods for meetings.'],
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
-  calls: ['Scheduled Calls', 'Initialize calls, reminders, and calendar-based meeting setup.'],
+  calls: ['Initialiser', 'Initialize calls, reminders, and calendar-based meeting setup.'],
   checklist: ['To-Do List', 'Priority, duration, status, sort, and filter.'],
   catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.']
 };
@@ -148,18 +167,22 @@ function renderAll() {
   renderCatchupHighlights();
 }
 
+function navigateToSection(section) {
+  activeSection = section;
+  $all('.nav-link').forEach(btn => btn.classList.toggle('active', btn.dataset.section === section));
+  $all('.section').forEach(sec => sec.classList.toggle('active', sec.id === section));
+  $('#sectionTitle').textContent = sectionsMeta[section][0];
+  $('#sectionSubtitle').textContent = sectionsMeta[section][1];
+  syncPageMeetingBox();
+}
+
 function bindNavigation() {
   $all('.nav-link').forEach(btn => {
     btn.addEventListener('click', () => {
-      const section = btn.dataset.section;
-      activeSection = section;
-      $all('.nav-link').forEach(n => n.classList.toggle('active', n === btn));
-      $all('.section').forEach(sec => sec.classList.toggle('active', sec.id === section));
-      $('#sectionTitle').textContent = sectionsMeta[section][0];
-      $('#sectionSubtitle').textContent = sectionsMeta[section][1];
-      syncPageMeetingBox();
+      navigateToSection(btn.dataset.section);
     });
   });
+  $('#statInitialiserBtn').addEventListener('click', () => navigateToSection('calls'));
   syncPageMeetingBox();
 }
 
@@ -192,7 +215,6 @@ function workloadClass(level) {
 function renderDashboard() {
   $('#statMembers').textContent = appData.members.length;
   $('#statTasks').textContent = appData.tasks.length;
-  $('#statDeadlines').textContent = appData.tasks.filter(t => t.status !== 'Done').length;
   $('#statMeetingTime').textContent = computeSuggestedMeeting().label;
 
   $('#memberCards').innerHTML = appData.members.map(member => `
@@ -228,34 +250,64 @@ function getActiveGroup() {
 function getActiveChannel() {
   return getActiveGroup().channels.find(c => c.id === activeChannelId) || getActiveGroup().channels[0];
 }
+function getGroupMessages(group = getActiveGroup()) {
+  return group.channels.flatMap(channel =>
+    channel.messages.map(message => ({
+      ...message,
+      channelId: channel.id,
+      channelName: channel.name
+    }))
+  );
+}
+function getMentionMessages() {
+  return appData.groups.flatMap(group =>
+    getGroupMessages(group)
+      .filter(message => /@you\b/i.test(message.text))
+      .map(message => ({ ...message, groupName: group.name }))
+  );
+}
+function getTodayMessages() {
+  return appData.groups.flatMap(group =>
+    getGroupMessages(group)
+      .filter(message => message.date === '2026-04-01')
+      .map(message => ({ ...message, groupName: group.name }))
+  );
+}
+function getActiveGroupSummary(group = getActiveGroup()) {
+  if (group.id === 2) {
+    return 'COMP Project Beta spent today tightening the prototype for presentation: testing feedback was reviewed, slide timing was shortened, and the reminder mock was requested for the final deck.';
+  }
+  return 'INFO2222 Team Alpha focused on demo polish today: meeting availability is being confirmed, the chat layout is under review, and the reminder/summary flow is being prepared for the next prototype pass.';
+}
+function syncChatModeVisibility() {
+  $('#chatMainView').classList.toggle('hidden', activeChatUtility !== 'chat');
+}
 
 function renderChat() {
   const activeGroup = getActiveGroup();
+  const groupMessages = getGroupMessages(activeGroup);
 
   $('#groupList').innerHTML = appData.groups.map(group => `
     <button class="group-item ${group.id === activeGroupId ? 'active' : ''}" data-group-id="${group.id}">
       <strong>${group.name}</strong><br />
-      <small class="muted">${group.channels.length} topic channels</small>
+      <small class="muted">${getGroupMessages(group).length} messages</small>
     </button>
   `).join('');
 
-  $('#channelList').innerHTML = activeGroup.channels.map(channel => `
-    <button class="channel-item ${channel.id === activeChannelId ? 'active' : ''}" data-channel-id="${channel.id}">
-      # ${channel.name}
-    </button>
-  `).join('');
-
-  const activeChannel = getActiveChannel();
-  $('#chatTitle').textContent = `# ${activeChannel.name}`;
-  $('#chatGroupLabel').textContent = activeGroup.name;
-  $('#messageCountBadge').textContent = `${activeChannel.messages.length} messages`;
-  $('#chatMessages').innerHTML = activeChannel.messages.map((msg, i) => `
-    <div class="message ${i % 3 === 2 ? 'self' : ''}">
+  $('#chatTitle').textContent = activeGroup.name;
+  $('#chatGroupLabel').textContent = 'All group messages';
+  $('#messageCountBadge').textContent = `${groupMessages.length} messages`;
+  $('#chatMessages').innerHTML = groupMessages.map(msg => `
+    <div class="message ${msg.sender === 'You' ? 'self' : ''}">
+      <span class="message-channel"># ${msg.channelName}</span>
       <strong>${msg.sender}</strong>
       <div>${msg.text}</div>
       <small>${msg.time}</small>
     </div>
   `).join('');
+  renderChatUtilityPanel();
+  syncChatUtilityButtons();
+  syncChatModeVisibility();
 
   $all('.group-item').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -264,12 +316,57 @@ function renderChat() {
       renderChat();
     });
   });
+}
 
-  $all('.channel-item').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activeChannelId = btn.dataset.channelId;
-      renderChat();
-    });
+function renderChatUtilityPanel() {
+  const panel = $('#chatUtilityPanel');
+
+  if (activeChatUtility === 'chat') {
+    panel.innerHTML = '';
+    panel.classList.add('hidden');
+    return;
+  }
+
+  panel.classList.remove('hidden');
+
+  if (activeChatUtility === 'summary') {
+    const todayMessages = getTodayMessages().filter(message => message.groupName === getActiveGroup().name);
+    panel.innerHTML = `
+      <div class="chat-utility-card">
+        <div class="chat-utility-header">
+          <strong>Daily Summary</strong>
+          <span class="badge">${todayMessages.length} messages today</span>
+        </div>
+        <p class="chat-utility-summary">
+          ${getActiveGroupSummary()}
+        </p>
+      </div>
+    `;
+    return;
+  }
+
+  const reminders = getMentionMessages().filter(message => message.groupName === getActiveGroup().name);
+  panel.innerHTML = `
+    <div class="chat-utility-card">
+      <div class="chat-utility-header">
+        <strong>Personal Reminder</strong>
+        <span class="badge">${reminders.length} mentions</span>
+      </div>
+      <div class="chat-utility-list">
+        ${reminders.map(message => `
+          <div class="chat-utility-item">
+            <div class="chat-utility-meta">${message.groupName} · # ${message.channelName} · ${message.time}</div>
+            <div><strong>${message.sender}:</strong> ${message.text}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function syncChatUtilityButtons() {
+  $all('[data-chat-utility]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.chatUtility === activeChatUtility);
   });
 }
 
@@ -279,9 +376,22 @@ function bindChat() {
     const input = $('#chatInput');
     const text = input.value.trim();
     if (!text) return;
-    getActiveChannel().messages.push({ sender: 'You', text, time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) });
+    getActiveChannel().messages.push({
+      sender: 'You',
+      text,
+      time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+      date: '2026-04-01'
+    });
     input.value = '';
     renderChat();
+  });
+
+  $all('[data-chat-utility]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeChatUtility = btn.dataset.chatUtility;
+      renderChatUtilityPanel();
+      syncChatUtilityButtons();
+    });
   });
 }
 
@@ -753,14 +863,25 @@ function formatTime(timeStr) {
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 function slotToReadable(slot, long = false) {
-  const [start, end] = slot.split('-');
-  const s = readableHour(start);
-  const e = readableHour(end);
+  const s = readableHour(slotBoundaryHour(slot, 'start'));
+  const e = readableHour(slotBoundaryHour(slot, 'end'));
   return long ? `${s} – ${e}` : `${s}–${e}`;
 }
 function slotStartLabel(slot) {
-  const [start] = slot.split('-');
-  return readableHour(start).replace(':00', '');
+  return readableHour(slotBoundaryHour(slot, 'start')).replace(':00', '');
+}
+function slotBoundaryHour(slot, boundary) {
+  const [startText, endText] = slot.split('-');
+  const start = Number(startText);
+  const end = Number(endText);
+
+  if (boundary === 'start') {
+    if (start === 12) return 12;
+    return start <= 5 ? start + 12 : start;
+  }
+
+  if (start === 12 && end === 1) return 13;
+  return end <= 5 ? end + 12 : end;
 }
 function readableHour(hourText) {
   const hour = Number(hourText);

@@ -27,7 +27,7 @@
           <button class="nav-link" data-section="chat">Group Chat</button>
           <button class="nav-link" data-section="heatmap">Stress Heatmap</button>
           <button class="nav-link" data-section="meeting">Meeting Decider</button>
-          <button class="nav-link" data-section="calls">Scheduled Calls</button>
+          <button class="nav-link" data-section="calls">Initialiser</button>
           <button class="nav-link" data-section="checklist">To-Do List</button>
           <button class="nav-link" data-section="catchup">Catch Me Up</button>
         </nav>
@@ -68,13 +68,13 @@
             <strong id="statTasks">9</strong>
           </div>
           <div class="stat-card">
-            <span>Upcoming deadlines</span>
-            <strong id="statDeadlines">5</strong>
-          </div>
-          <div class="stat-card">
             <span>Best meeting time</span>
             <strong id="statMeetingTime">Wed 4–5pm</strong>
           </div>
+          <button type="button" class="stat-card stat-card-link" id="statInitialiserBtn">
+            <span>Initialiser</span>
+            <strong class="stat-emoji" aria-hidden="true">🤖</strong>
+          </button>
         </div>
 
         <div class="grid two-col">
@@ -100,30 +100,33 @@
         <div class="grid chat-layout">
           <div class="card chat-sidebar-card">
             <div class="card-header">
-              <h3>Group chats</h3>
+              <h3>Groups</h3>
               <button class="small-btn" id="openCreateGroupInline">+ New</button>
             </div>
             <div id="groupList" class="group-list"></div>
-            <hr />
-            <div class="card-header compact-header">
-              <h3>Topics</h3>
-            </div>
-            <div id="channelList" class="channel-list"></div>
           </div>
 
           <div class="card chat-card">
-            <div class="chat-topbar">
-              <div>
-                <h3 id="chatTitle"># General</h3>
-                <p id="chatGroupLabel" class="muted">INFO2222 Team Alpha</p>
-              </div>
-              <span class="badge" id="messageCountBadge">0 messages</span>
+            <div class="chat-utility-bar">
+              <button type="button" class="chat-utility-btn active" data-chat-utility="chat" id="groupChatBtn">Group Chat</button>
+              <button type="button" class="chat-utility-btn" data-chat-utility="reminders" id="personalReminderBtn">Personal Reminder</button>
+              <button type="button" class="chat-utility-btn" data-chat-utility="summary" id="dailySummaryBtn">Daily Summary</button>
             </div>
-            <div id="chatMessages" class="chat-messages"></div>
-            <form id="chatForm" class="chat-input-row">
-              <input id="chatInput" type="text" placeholder="Type a message..." />
-              <button class="primary-btn" type="submit">Send</button>
-            </form>
+            <div id="chatUtilityPanel" class="chat-utility-panel"></div>
+            <div class="chat-main-view" id="chatMainView">
+              <div class="chat-topbar">
+                <div>
+                  <h3 id="chatTitle">INFO2222 Team Alpha</h3>
+                  <p id="chatGroupLabel" class="muted">All group messages</p>
+                </div>
+                <span class="badge" id="messageCountBadge">0 messages</span>
+              </div>
+              <div id="chatMessages" class="chat-messages"></div>
+              <form id="chatForm" class="chat-input-row">
+                <input id="chatInput" type="text" placeholder="Type a message..." />
+                <button class="primary-btn" type="submit">Send</button>
+              </form>
+            </div>
           </div>
         </div>
       </section>
@@ -181,8 +184,8 @@
         <div class="grid two-col">
           <div class="card">
             <div class="card-header">
-              <h3>Initializer / scheduled calls</h3>
-              <span class="badge">Upcoming calls</span>
+              <h3>Initialiser</h3>
+              <span class="badge">Start calls</span>
             </div>
             <div id="scheduledCalls" class="call-list"></div>
 

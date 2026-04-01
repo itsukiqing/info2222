@@ -232,6 +232,20 @@ button { cursor: pointer; }
   position: relative;
   overflow: hidden;
 }
+.stat-card-link {
+  text-align: center;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+.stat-card-link:hover {
+  transform: translateY(-2px);
+  border-color: rgba(15, 118, 110, 0.22);
+  box-shadow: 0 18px 34px rgba(15, 118, 110, 0.12);
+}
 .stat-card span {
   color: var(--muted);
   font-size: 0.92rem;
@@ -243,6 +257,12 @@ button { cursor: pointer; }
   margin-top: 12px;
   font-size: 1.9rem;
   letter-spacing: -0.04em;
+}
+.stat-emoji {
+  display: block;
+  margin-top: 18px;
+  font-size: 6rem !important;
+  line-height: 1;
 }
 .card {
   padding: 22px;
@@ -329,11 +349,11 @@ button { cursor: pointer; }
   grid-template-columns: 300px 1fr;
 }
 .chat-sidebar-card, .chat-card { min-height: 620px; }
-.group-list, .channel-list {
+.group-list {
   display: grid;
   gap: 8px;
 }
-.group-item, .channel-item {
+.group-item {
   padding: 12px;
   border-radius: 16px;
   border: 1px solid var(--line);
@@ -341,14 +361,79 @@ button { cursor: pointer; }
   color: var(--text);
   transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, border-color 0.16s ease;
 }
-.group-item:hover, .channel-item:hover {
+.group-item:hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 22px rgba(18, 49, 58, 0.07);
 }
-.group-item.active, .channel-item.active {
+.group-item.active {
   background: linear-gradient(135deg, rgba(217, 245, 241, 0.96), rgba(241, 253, 251, 0.96));
   border-color: rgba(15, 118, 110, 0.18);
   box-shadow: 0 12px 24px rgba(15, 118, 110, 0.1);
+}
+.chat-utility-bar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.chat-utility-btn {
+  border: 1px solid rgba(15, 118, 110, 0.12);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--muted);
+  border-radius: 16px;
+  padding: 10px 14px;
+  font-weight: 700;
+  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+.chat-utility-btn:hover {
+  transform: translateY(-1px);
+}
+.chat-utility-btn.active {
+  background: linear-gradient(135deg, rgba(217, 245, 241, 0.98), rgba(241, 253, 251, 0.98));
+  color: var(--primary-strong);
+  border-color: rgba(15, 118, 110, 0.18);
+  box-shadow: 0 12px 24px rgba(15, 118, 110, 0.1);
+}
+.chat-utility-panel {
+  margin-bottom: 16px;
+}
+.chat-main-view {
+  display: grid;
+  gap: 0;
+}
+.chat-utility-card {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(245, 251, 250, 0.92));
+  box-shadow: 0 10px 24px rgba(18, 49, 58, 0.05);
+}
+.chat-utility-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.chat-utility-summary {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.55;
+}
+.chat-utility-list {
+  display: grid;
+  gap: 10px;
+}
+.chat-utility-item {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(137, 158, 175, 0.16);
+}
+.chat-utility-meta {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 .chat-topbar {
   display: flex;
@@ -383,6 +468,18 @@ button { cursor: pointer; }
 .message strong {
   display: block;
   margin-bottom: 6px;
+}
+.message-channel {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(217, 245, 241, 0.9);
+  color: var(--primary-strong);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 .message small {
   display: block;
@@ -600,7 +697,7 @@ button { cursor: pointer; }
 }
 .meeting-decision-compact.page-meeting-box {
   flex-shrink: 0;
-  width: min(100%, 340px);
+  width: min(100%, 280px);
 }
 .meeting-decision-compact {
   flex-shrink: 0;
