@@ -48,6 +48,15 @@ create table if not exists public.chat_group_member_profiles (
   primary key (group_id, user_id)
 );
 
+create table if not exists public.chat_group_member_availability (
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  day_name text not null,
+  slots text[] not null default '{}',
+  updated_at timestamptz not null default now(),
+  primary key (group_id, user_id, day_name)
+);
+
 alter table public.chat_groups enable row level security;
 alter table public.chat_group_members enable row level security;
 alter table public.chat_channels enable row level security;
@@ -184,6 +193,9 @@ on public.chat_messages(channel_id, created_at);
 
 create index if not exists chat_group_member_profiles_group_id_idx
 on public.chat_group_member_profiles(group_id);
+
+create index if not exists chat_group_member_availability_group_id_idx
+on public.chat_group_member_availability(group_id);
 
 create or replace function public.create_chat_group(
   group_name text,
@@ -390,6 +402,28 @@ $$;
 
 grant execute on function public.get_chat_group_members(uuid) to authenticated;
 
+create or replace function public.get_chat_group_availability(target_group_id uuid)
+returns table(
+  user_id uuid,
+  day_name text,
+  slots text[]
+)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select
+    availability.user_id,
+    availability.day_name,
+    availability.slots
+  from public.chat_group_member_availability availability
+  where availability.group_id = target_group_id
+    and public.is_chat_group_member(target_group_id, auth.uid());
+$$;
+
+grant execute on function public.get_chat_group_availability(uuid) to authenticated;
+
 create or replace function public.upsert_chat_group_member_profile(
   target_group_id uuid,
   target_user_id uuid,
@@ -558,6 +592,10 @@ begin
   where group_id = target_group_id
     and user_id = target_user_id;
 
+  delete from public.chat_group_member_availability
+  where group_id = target_group_id
+    and user_id = target_user_id;
+
   delete from public.chat_group_members
   where group_id = target_group_id
     and user_id = target_user_id;
@@ -565,6 +603,65 @@ end;
 $$;
 
 grant execute on function public.remove_chat_group_member(uuid, uuid) to authenticated;
+
+create or replace function public.upsert_my_chat_group_availability(
+  target_group_id uuid,
+  target_day_name text,
+  target_slots text[]
+)
+returns table(
+  user_id uuid,
+  day_name text,
+  slots text[]
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  acting_user_id uuid;
+begin
+  acting_user_id := auth.uid();
+
+  if acting_user_id is null then
+    raise exception 'You must be signed in to update availability';
+  end if;
+
+  if not public.is_chat_group_member(target_group_id, acting_user_id) then
+    raise exception 'You are not a member of this team';
+  end if;
+
+  insert into public.chat_group_member_availability (
+    group_id,
+    user_id,
+    day_name,
+    slots,
+    updated_at
+  )
+  values (
+    target_group_id,
+    acting_user_id,
+    target_day_name,
+    coalesce(target_slots, '{}'),
+    now()
+  )
+  on conflict (group_id, user_id, day_name) do update
+  set slots = excluded.slots,
+      updated_at = excluded.updated_at;
+
+  return query
+  select
+    availability.user_id,
+    availability.day_name,
+    availability.slots
+  from public.chat_group_member_availability availability
+  where availability.group_id = target_group_id
+    and availability.user_id = acting_user_id
+    and availability.day_name = target_day_name;
+end;
+$$;
+
+grant execute on function public.upsert_my_chat_group_availability(uuid, text, text[]) to authenticated;
 
 create or replace function public.add_chat_group_member_by_email(
   target_group_id uuid,

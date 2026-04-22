@@ -141,6 +141,8 @@ let teamMembers = [];
 let teamMembersLoading = false;
 let teamMembersError = '';
 let loadedTeamMembersGroupId = null;
+let meetingAvailability = {};
+let meetingAvailabilityLoading = false;
 
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
 const MEMBER_STAGES = ['Not set', 'To Do', 'In Progress', 'Review', 'Done'];
@@ -152,7 +154,7 @@ let checklistStatusFilter = null;
 let checklistFilterMenuOpen = false;
 let meetingEditMode = false;
 let activeChatUtility = 'chat';
-const editableMeetingMember = 'You';
+const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
@@ -160,7 +162,7 @@ const sectionsMeta = {
   chat: ['Group Chat', 'Create groups, switch channels, and follow topic-based discussions.'],
   heatmap: ['Stress Heatmap', 'See deadlines, clashes, and low-stress periods for meetings.'],
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
-  calls: ['Initialiser', 'Initialize calls, reminders, and calendar-based meeting setup.'],
+  calls: ['Initialiser', 'Initialise calls, reminders, and calendar-based meeting setup.'],
   checklist: ['To-Do List', 'Priority, duration, status, sort, and filter.'],
   catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.']
 };
@@ -268,6 +270,8 @@ function bindAuth() {
     teamMembersError = '';
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
+    meetingAvailability = {};
+    meetingAvailabilityLoading = false;
     navigateToSection('dashboard');
     syncAuthView();
   });
@@ -713,6 +717,7 @@ function renderMemberDrivenViews() {
   renderDashboard();
   renderMembersDirectory();
   renderHeatmap();
+  renderMeeting();
 }
 
 function canManageActiveGroup() {
@@ -784,6 +789,131 @@ async function addMemberByEmailFallback(groupId, email) {
     added_email: profile.email,
     added_full_name: profile.full_name || profile.username || profile.email
   };
+}
+
+function createEmptyMeetingAvailability(memberNames = []) {
+  return MEETING_DAYS.reduce((days, day) => {
+    days[day] = memberNames.reduce((membersMap, name) => {
+      membersMap[name] = [];
+      return membersMap;
+    }, {});
+    return days;
+  }, {});
+}
+
+function syncMeetingAvailabilityMembers() {
+  const members = getActiveTeamMembers();
+  const names = members.map(member => member.name);
+  const fresh = createEmptyMeetingAvailability(names);
+
+  for (const day of MEETING_DAYS) {
+    for (const name of names) {
+      fresh[day][name] = [...(meetingAvailability?.[day]?.[name] || [])];
+    }
+  }
+
+  meetingAvailability = fresh;
+}
+
+function getEditableMeetingMemberName() {
+  const currentMember = getActiveTeamMembers().find(member => String(member.id) === String(currentUser?.id));
+  return currentMember?.name || currentUser?.name || 'You';
+}
+
+function mapAvailabilityRowsToState(rows) {
+  const members = getActiveTeamMembers();
+  const names = members.map(member => member.name);
+  const state = createEmptyMeetingAvailability(names);
+  const membersById = new Map(members.map(member => [String(member.id), member.name]));
+
+  (rows || []).forEach(row => {
+    const memberName = membersById.get(String(row.user_id));
+    if (!memberName || !state[row.day_name]) return;
+    state[row.day_name][memberName] = Array.isArray(row.slots) ? row.slots.filter(slot => timeSlots.includes(slot)) : [];
+  });
+
+  return state;
+}
+
+async function loadMeetingAvailabilityForActiveGroup() {
+  syncMeetingAvailabilityMembers();
+
+  if (!supabaseClient || !currentUser) {
+    Object.entries(appData.availability).forEach(([day, members]) => {
+      if (!meetingAvailability[day]) return;
+      Object.entries(members).forEach(([name, slots]) => {
+        if (meetingAvailability[day][name]) {
+          meetingAvailability[day][name] = [...slots];
+        }
+      });
+    });
+    renderMeeting();
+    return;
+  }
+
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) {
+    renderMeeting();
+    return;
+  }
+
+  meetingAvailabilityLoading = true;
+  renderMeeting();
+
+  const { data, error } = await supabaseClient.rpc('get_chat_group_availability', {
+    target_group_id: activeGroup.id
+  });
+
+  if (!error) {
+    meetingAvailability = mapAvailabilityRowsToState(data);
+    meetingAvailabilityLoading = false;
+    renderMeeting();
+    return;
+  }
+
+  const { data: fallbackRows, error: fallbackError } = await supabaseClient
+    .from('chat_group_member_availability')
+    .select('user_id, day_name, slots')
+    .eq('group_id', activeGroup.id);
+
+  if (!fallbackError) {
+    meetingAvailability = mapAvailabilityRowsToState(fallbackRows);
+  }
+
+  meetingAvailabilityLoading = false;
+  renderMeeting();
+}
+
+async function saveCurrentUserAvailability(day, slots) {
+  if (!supabaseClient || !currentUser) {
+    if (!appData.availability[day]) appData.availability[day] = {};
+    appData.availability[day][getEditableMeetingMemberName()] = [...slots];
+    return;
+  }
+
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) throw new Error('Select a team first.');
+
+  const payload = {
+    target_group_id: activeGroup.id,
+    target_day_name: day,
+    target_slots: slots
+  };
+
+  const { error } = await supabaseClient.rpc('upsert_my_chat_group_availability', payload);
+  if (!error) return;
+
+  const { error: fallbackError } = await supabaseClient
+    .from('chat_group_member_availability')
+    .upsert({
+      group_id: activeGroup.id,
+      user_id: currentUser.id,
+      day_name: day,
+      slots,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'group_id,user_id,day_name' });
+
+  if (fallbackError) throw error;
 }
 
 async function saveCurrentUserDeadline(deadline) {
@@ -993,6 +1123,7 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
     renderMemberDrivenViews();
+    loadMeetingAvailabilityForActiveGroup();
     return;
   }
 
@@ -1003,6 +1134,7 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
     renderMemberDrivenViews();
+    loadMeetingAvailabilityForActiveGroup();
     return;
   }
 
@@ -1049,6 +1181,7 @@ async function loadTeamMembersForActiveGroup() {
   teamMembersLoading = false;
   teamMembersError = '';
   renderMemberDrivenViews();
+  await loadMeetingAvailabilityForActiveGroup();
 }
 
 async function loadChatMemberDirectory() {
@@ -1082,7 +1215,7 @@ function renderGroupMemberPicker() {
   }
 
   if (!selectableMembers.length) {
-    picker.innerHTML = '<p class="member-picker-empty">No other users found yet.</p>';
+    picker.innerHTML = '<p class="member-picker-empty">No other users found yet. You can still create the group and add members later.</p>';
     return;
   }
 
@@ -1585,7 +1718,10 @@ function renderHeatmap() {
 
 function bindMeeting() {
   $('#confirmMeeting').addEventListener('click', () => {
-    $('#meetingFeedback').textContent = 'Meeting confirmed and reminder ready.';
+    const suggestion = computeSuggestedMeeting();
+    $('#meetingFeedback').textContent = suggestion.score > 0
+      ? `Meeting confirmed for ${suggestion.labelFull}.`
+      : 'Add more availability before confirming a meeting.';
   });
   $('#rejectMeeting').addEventListener('click', () => {
     $('#meetingFeedback').textContent = 'Suggestion rejected. Try another low-stress slot.';
@@ -1597,25 +1733,32 @@ function bindMeeting() {
     syncMeetingEditState();
     renderAvailabilityGrid();
   });
-  $('#availabilityGrid').addEventListener('click', e => {
+  $('#availabilityGrid').addEventListener('click', async e => {
     const cell = e.target.closest('.availability-cell.editable-cell');
     if (!cell || !meetingEditMode) return;
 
-    const day = $('#meetingDaySelect').value || Object.keys(appData.availability)[0];
+    const day = $('#meetingDaySelect').value || MEETING_DAYS[0];
     const slot = cell.dataset.slot;
-    const slots = appData.availability[day][editableMeetingMember];
+    const editableMember = getEditableMeetingMemberName();
+    const slots = meetingAvailability[day]?.[editableMember] || [];
     const nextSlots = slots.includes(slot)
       ? slots.filter(value => value !== slot)
       : [...slots, slot].sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
 
-    appData.availability[day][editableMeetingMember] = nextSlots;
-    $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
+    meetingAvailability[day][editableMember] = nextSlots;
+    $('#meetingFeedback').textContent = `Saving your availability for ${day}...`;
+    try {
+      await saveCurrentUserAvailability(day, nextSlots);
+      $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
+    } catch (error) {
+      $('#meetingFeedback').textContent = error.message || `Could not update your availability for ${day}.`;
+    }
     renderAvailabilityGrid();
   });
 }
 
 function renderMeeting() {
-  const days = Object.keys(appData.availability);
+  const days = MEETING_DAYS;
   const currentDay = $('#meetingDaySelect').value;
   $('#meetingDaySelect').innerHTML = days.map(day => `<option value="${day}">${day}</option>`).join('');
   $('#meetingDaySelect').value = days.includes(currentDay) ? currentDay : days[0];
@@ -1624,23 +1767,44 @@ function renderMeeting() {
 }
 
 function renderAvailabilityGrid() {
-  const day = $('#meetingDaySelect').value || Object.keys(appData.availability)[0];
-  const dayData = appData.availability[day];
+  const activeGroup = getActiveGroup();
+  if (supabaseClient && !activeGroup) {
+    $('#availabilityGrid').innerHTML = '<p class="muted">Select a team chat first to compare real meeting availability.</p>';
+    updateMeetingSuggestion();
+    return;
+  }
+
+  if (meetingAvailabilityLoading) {
+    $('#availabilityGrid').innerHTML = '<p class="muted">Loading team availability...</p>';
+    updateMeetingSuggestion();
+    return;
+  }
+
+  const day = $('#meetingDaySelect').value || MEETING_DAYS[0];
+  const dayData = meetingAvailability[day] || {};
+  const editableMember = getEditableMeetingMemberName();
   const memberNames = Object.keys(dayData).sort((a, b) => {
-    if (a === editableMeetingMember) return 1;
-    if (b === editableMeetingMember) return -1;
+    if (a === editableMember) return 1;
+    if (b === editableMember) return -1;
     return 0;
   });
+
+  if (!memberNames.length) {
+    $('#availabilityGrid').innerHTML = '<p class="muted">No team members available yet.</p>';
+    updateMeetingSuggestion();
+    return;
+  }
+
   const overlaps = timeSlots.filter(slot => memberNames.every(name => dayData[name].includes(slot)));
 
   let html = `<div class="availability-header"><div class="availability-cell member-label">Member</div>${timeSlots.map(slot => `<div class="availability-cell">${slotStartLabel(slot)}</div>`).join('')}</div>`;
   html += memberNames.map(name => `
-    <div class="availability-row ${name === editableMeetingMember ? 'editable-member-row' : ''}">
+    <div class="availability-row ${name === editableMember ? 'editable-member-row' : ''}">
       <div class="availability-cell member-label">${name}</div>
       ${timeSlots.map(slot => {
         const isSelected = dayData[name].includes(slot);
         const isOverlap = overlaps.includes(slot);
-        const isEditable = name === editableMeetingMember && meetingEditMode;
+        const isEditable = name === editableMember && meetingEditMode;
         return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''} ${isEditable ? 'editable-cell' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
       }).join('')}
     </div>
@@ -1651,8 +1815,9 @@ function renderAvailabilityGrid() {
 }
 
 function computeSuggestedMeeting() {
-  let best = { day: 'Wednesday', slot: '4-5', score: -1 };
-  for (const [day, memberData] of Object.entries(appData.availability)) {
+  const days = Object.keys(meetingAvailability);
+  let best = { day: days[0] || 'Wednesday', slot: '4-5', score: 0 };
+  for (const [day, memberData] of Object.entries(meetingAvailability)) {
     for (const slot of timeSlots) {
       const count = Object.values(memberData).filter(slots => slots.includes(slot)).length;
       if (count > best.score) best = { day, slot, score: count };
@@ -1666,9 +1831,7 @@ function computeSuggestedMeeting() {
 }
 
 function ensureEditableMeetingMember() {
-  Object.values(appData.availability).forEach(dayData => {
-    if (!dayData[editableMeetingMember]) dayData[editableMeetingMember] = [];
-  });
+  syncMeetingAvailabilityMembers();
 }
 
 function syncMeetingEditState() {
@@ -1970,7 +2133,7 @@ function bindGroupModal() {
   $('#groupForm').addEventListener('submit', async e => {
     e.preventDefault();
     const name = $('#groupNameInput').value.trim();
-    const topic = $('#groupTopicInput').value.trim();
+    const topic = $('#groupTopicInput').value.trim() || 'General';
 
     if (supabaseClient && currentUser) {
       const selectedMemberIds = [
