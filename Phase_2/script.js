@@ -1,10 +1,5 @@
 const appData = {
-  members: [
-    { id: 1, name: 'Ava', role: 'Coordinator', currentTask: 'Meeting plan', stage: 'In Progress', deadline: '2026-04-08', workload: 'High', initials: 'A' },
-    { id: 2, name: 'Ben', role: 'Frontend', currentTask: 'Chat UI', stage: 'Review', deadline: '2026-04-10', workload: 'Medium', initials: 'B' },
-    { id: 3, name: 'Chloe', role: 'Report Lead', currentTask: 'Methodology section', stage: 'To Do', deadline: '2026-04-06', workload: 'Low', initials: 'C' },
-    { id: 4, name: 'Daniel', role: 'Developer', currentTask: 'Heatmap logic', stage: 'In Progress', deadline: '2026-04-12', workload: 'High', initials: 'D' }
-  ],
+  members: [],
   groups: [
     {
       id: 1,
@@ -109,11 +104,47 @@ const appData = {
   }
 };
 
+const AUTH_STORAGE_KEY = 'unigroupHubCurrentUser';
+const DEMO_USERS_STORAGE_KEY = 'unigroupHubDemoUsers';
+const SUPABASE_PLACEHOLDER_URL = 'https://YOUR_PROJECT_ID.supabase.co';
+const SUPABASE_PLACEHOLDER_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_AUTH_TIMEOUT_MS = 12000;
+const demoUsers = [
+  { id: 1, name: 'Ava', username: 'ava', email: 'ava@unigroup.test', password: 'password123', role: 'Coordinator', teamName: 'INFO2222 Team Alpha' },
+  { id: 2, name: 'Ben', username: 'ben', email: 'ben@unigroup.test', password: 'password123', role: 'Frontend', teamName: 'INFO2222 Team Alpha' },
+  { id: 3, name: 'Chloe', username: 'chloe', email: 'chloe@unigroup.test', password: 'password123', role: 'Report Lead', teamName: 'COMP Project Beta' },
+  { id: 4, name: 'Daniel', username: 'daniel', email: 'daniel@unigroup.test', password: 'password123', role: 'Developer', teamName: 'COMP Project Beta' }
+];
+
+appData.members = demoUsers.map(user => normalizeTeamMember({
+  ...user,
+  current_task: '',
+  stage: 'Not set',
+  deadline: '',
+  workload: 'Not set'
+}));
+
 let activeSection = 'dashboard';
 let activeGroupId = 1;
 let activeChannelId = 'general';
+let currentUser = null;
+let supabaseClient = null;
+let authMode = 'demo';
+let authFormMode = 'login';
+let chatSubscription = null;
+let chatLoading = false;
+let chatInitInProgress = false;
+let chatLoadError = '';
+let availableChatMembers = [];
+let chatLoadVersion = 0;
+let teamMembers = [];
+let teamMembersLoading = false;
+let teamMembersError = '';
+let loadedTeamMembersGroupId = null;
 
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
+const MEMBER_STAGES = ['Not set', 'To Do', 'In Progress', 'Review', 'Done'];
+const MEMBER_WORKLOADS = ['Not set', 'Low', 'Medium', 'High'];
 
 let checklistSortBy = 'priority';
 let checklistSortAscending = true;
@@ -125,6 +156,7 @@ const editableMeetingMember = 'You';
 
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
+  members: ['Team Members', 'Contact details for the current project team.'],
   chat: ['Group Chat', 'Create groups, switch channels, and follow topic-based discussions.'],
   heatmap: ['Stress Heatmap', 'See deadlines, clashes, and low-stress periods for meetings.'],
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
@@ -142,7 +174,10 @@ function $all(selector) {
   return [...document.querySelectorAll(selector)];
 }
 
-function init() {
+async function init() {
+  bindAuth();
+  initSupabaseClient();
+  await restoreSession();
   ensureEditableMeetingMember();
   bindNavigation();
   bindAddDeadlineModal();
@@ -153,14 +188,16 @@ function init() {
   bindChecklistControls();
   bindCatchup();
   bindGroupModal();
+  bindAddMemberModal();
+  bindMembersDirectory();
   startSidebarClock();
   renderAll();
+  syncAuthView();
 }
 
 function renderAll() {
-  renderDashboard();
+  renderMemberDrivenViews();
   renderChat();
-  renderHeatmap();
   renderMeeting();
   renderCalls();
   renderTasks();
@@ -176,19 +213,407 @@ function navigateToSection(section) {
   syncPageMeetingBox();
 }
 
+function bindAuth() {
+  $('#loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('#loginEmail').value.trim().toLowerCase();
+    const password = $('#loginPassword').value;
+
+    if (authFormMode === 'register') {
+      const registrationEmail = $('#registerEmail').value.trim().toLowerCase();
+      await registerUser(registrationEmail, password);
+      return;
+    }
+
+    if (supabaseClient) {
+      await signInWithSupabase(email, password);
+      return;
+    }
+
+    const user = getDemoUsers().find(account => account.email === email && account.password === password);
+
+    if (!user) {
+      $('#loginFeedback').textContent = 'Email or password is incorrect.';
+      return;
+    }
+
+    currentUser = {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      teamName: user.teamName || ''
+    };
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(currentUser));
+    $('#loginForm').reset();
+    $('#loginFeedback').textContent = '';
+    renderChat();
+    syncAuthView();
+  });
+
+  $('#logoutBtn').addEventListener('click', async () => {
+    if (supabaseClient) {
+      const { error } = await supabaseClient.auth.signOut();
+      if (error) {
+        $('#loginFeedback').textContent = error.message;
+        return;
+      }
+    }
+
+    currentUser = null;
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    teardownDatabaseChat();
+    teamMembers = [];
+    teamMembersError = '';
+    teamMembersLoading = false;
+    loadedTeamMembersGroupId = null;
+    navigateToSection('dashboard');
+    syncAuthView();
+  });
+
+  $('#toggleAuthMode').addEventListener('click', () => {
+    authFormMode = authFormMode === 'login' ? 'register' : 'login';
+    $('#loginFeedback').textContent = '';
+    syncAuthFormMode();
+  });
+}
+
+function initSupabaseClient() {
+  const config = window.UNIGROUP_SUPABASE_CONFIG || {};
+  const hasRealConfig =
+    config.url &&
+    config.anonKey &&
+    config.url !== SUPABASE_PLACEHOLDER_URL &&
+    config.anonKey !== SUPABASE_PLACEHOLDER_ANON_KEY;
+
+  if (!hasRealConfig || !window.supabase) {
+    authMode = 'demo';
+    return;
+  }
+
+  supabaseClient = window.supabase.createClient(config.url, config.anonKey);
+  authMode = 'supabase';
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    console.debug(`[auth] state changed: ${_event}`);
+
+    window.setTimeout(async () => {
+      const profile = session ? await getProfileForUserId(session.user.id) : null;
+      currentUser = getUserFromSupabaseSession(session, profile);
+      if (currentUser) initDatabaseChat();
+      else teardownDatabaseChat();
+      renderChat();
+      syncAuthView();
+    }, 0);
+  });
+}
+
+async function signInWithSupabase(email, password) {
+  $('#loginFeedback').textContent = 'Signing in...';
+  let authTimerRunning = false;
+  let profileTimerRunning = false;
+
+  try {
+    console.time('auth:signInWithPassword');
+    authTimerRunning = true;
+    const { data, error } = await withTimeout(
+      supabaseClient.auth.signInWithPassword({ email, password }),
+      SUPABASE_AUTH_TIMEOUT_MS,
+      'Sign in timed out. Check your internet connection and Supabase project settings.'
+    );
+    console.timeEnd('auth:signInWithPassword');
+    authTimerRunning = false;
+
+    if (error) {
+      $('#loginFeedback').textContent = error.message;
+      return;
+    }
+
+    if (!data.session) {
+      $('#loginFeedback').textContent = 'Sign in did not return a session. Check Supabase Auth settings.';
+      return;
+    }
+
+    console.time('auth:profileFetch');
+    profileTimerRunning = true;
+    const profile = await withTimeout(
+      getProfileForUserId(data.session.user.id),
+      SUPABASE_AUTH_TIMEOUT_MS,
+      'Profile lookup timed out. Check the profiles table policy.'
+    );
+    console.timeEnd('auth:profileFetch');
+    profileTimerRunning = false;
+    currentUser = getUserFromSupabaseSession(data.session, profile);
+    $('#loginForm').reset();
+    $('#loginFeedback').textContent = '';
+    renderChat();
+    syncAuthView();
+    initDatabaseChat();
+  } catch (error) {
+    if (authTimerRunning) console.timeEnd('auth:signInWithPassword');
+    if (profileTimerRunning) console.timeEnd('auth:profileFetch');
+    $('#loginFeedback').textContent = error.message || 'Could not sign in.';
+  }
+}
+
+async function registerUser(email, password) {
+  const fullName = $('#registerFullName').value.trim();
+  const username = $('#registerUsername').value.trim().toLowerCase();
+
+  if (!fullName || !username || !email) {
+    $('#loginFeedback').textContent = 'Enter your full name, username, and email.';
+    return;
+  }
+
+  if (password.length < 6) {
+    $('#loginFeedback').textContent = 'Password must be at least 6 characters.';
+    return;
+  }
+
+  if (supabaseClient) {
+    await registerWithSupabase(email, password, username, fullName);
+    return;
+  }
+
+  registerDemoUser(email, password, username, fullName);
+}
+
+async function registerWithSupabase(email, password, username, fullName) {
+  $('#loginFeedback').textContent = 'Creating account...';
+  const { data, error } = await supabaseClient.auth.signUp({
+    email,
+    password,
+    options: {
+      data: {
+        username,
+        full_name: fullName,
+        email
+      }
+    }
+  });
+
+  if (error) {
+    $('#loginFeedback').textContent = error.message;
+    return;
+  }
+
+  $('#loginForm').reset();
+
+  if (!data.session) {
+    $('#loginFeedback').textContent = 'Account created, but Supabase email confirmation is still enabled. Turn off Confirm email to auto-login after register.';
+    authFormMode = 'login';
+    syncAuthFormMode();
+    return;
+  }
+
+  const profileSaved = await saveSupabaseProfile(data.user.id, username, email, fullName);
+  if (!profileSaved) {
+    $('#loginFeedback').textContent = 'Account created, but the profile was not saved. Check the profiles table policies.';
+    return;
+  }
+
+  currentUser = getUserFromSupabaseSession(data.session, {
+    id: data.user.id,
+    username,
+    email,
+    full_name: fullName,
+    role: 'Team member'
+  });
+  $('#loginFeedback').textContent = '';
+  renderChat();
+  syncAuthView();
+  initDatabaseChat();
+}
+
+async function saveSupabaseProfile(id, username, email, fullName) {
+  const { error } = await supabaseClient
+    .from('profiles')
+    .upsert(
+      {
+        id,
+        username,
+        email,
+        full_name: fullName
+      },
+      { onConflict: 'id' }
+    );
+
+  if (error) {
+    console.warn('Could not save profile after signup:', error.message);
+    return false;
+  }
+
+  return true;
+}
+
+function registerDemoUser(email, password, username, fullName) {
+  const users = getDemoUsers();
+
+  if (users.some(user => user.email === email)) {
+    $('#loginFeedback').textContent = 'An account with this email already exists.';
+    return;
+  }
+
+  const user = {
+    id: Date.now(),
+    name: fullName,
+    username,
+    email,
+    password,
+    role: 'Team member'
+  };
+
+  users.push(user);
+  localStorage.setItem(DEMO_USERS_STORAGE_KEY, JSON.stringify(users.filter(account => !demoUsers.some(base => base.email === account.email))));
+  currentUser = {
+    id: user.id,
+    username: user.username,
+    name: user.name,
+    email: user.email,
+    role: user.role
+  };
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(currentUser));
+  $('#loginForm').reset();
+  $('#loginFeedback').textContent = '';
+  renderChat();
+  syncAuthView();
+}
+
+function getDemoUsers() {
+  try {
+    const storedUsers = JSON.parse(localStorage.getItem(DEMO_USERS_STORAGE_KEY)) || [];
+    return [...demoUsers, ...storedUsers];
+  } catch (error) {
+    localStorage.removeItem(DEMO_USERS_STORAGE_KEY);
+    return [...demoUsers];
+  }
+}
+
+async function restoreSession() {
+  if (supabaseClient) {
+    const { data, error } = await supabaseClient.auth.getSession();
+    const profile = !error && data.session ? await getProfileForUserId(data.session.user.id) : null;
+    currentUser = error ? null : getUserFromSupabaseSession(data.session, profile);
+    if (currentUser) initDatabaseChat();
+    return;
+  }
+
+  try {
+    const stored = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY));
+    const knownUser = stored && getDemoUsers().find(user => user.email === stored.email);
+    currentUser = knownUser
+      ? { id: knownUser.id, username: knownUser.username, name: knownUser.name, email: knownUser.email, role: knownUser.role }
+      : null;
+  } catch (error) {
+    currentUser = null;
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+}
+
+async function getProfileForUserId(id) {
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('id, username, email, full_name, role')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error) return null;
+  return data || null;
+}
+
+function getUserFromSupabaseSession(session, profile = null) {
+  if (!session || !session.user) return null;
+  const user = session.user;
+  const displayName =
+    profile?.full_name ||
+    user.user_metadata?.full_name ||
+    user.user_metadata?.name ||
+    user.email?.split('@')[0] ||
+    'Student';
+
+  return {
+    id: user.id,
+    username: profile?.username || user.user_metadata?.username || '',
+    name: displayName,
+    email: profile?.email || user.email || 'Signed in',
+    role: profile?.role || user.user_metadata?.role || 'Team member'
+  };
+}
+
+function syncAuthView() {
+  const isLoggedIn = Boolean(currentUser);
+  $('#loginScreen').classList.toggle('hidden', isLoggedIn);
+  $('#appShell').classList.toggle('hidden', !isLoggedIn);
+
+  syncAuthHint();
+  syncAuthFormMode();
+
+  if (!isLoggedIn) {
+    $('#loginEmail').focus();
+    return;
+  }
+
+  $('#signedInName').textContent = currentUser.name;
+  $('#signedInEmail').textContent = currentUser.email;
+}
+
+function syncAuthFormMode() {
+  const isRegistering = authFormMode === 'register';
+  $all('.register-only').forEach(field => field.classList.toggle('hidden', !isRegistering));
+  $all('.login-only').forEach(field => field.classList.toggle('hidden', isRegistering));
+  $('#authSubmitBtn').textContent = isRegistering ? 'Create account' : 'Log in';
+  $('#authSwitchText').textContent = isRegistering ? 'Already have an account?' : 'Need an account?';
+  $('#toggleAuthMode').textContent = isRegistering ? 'Log in' : 'Register';
+  $('#loginEmail').required = !isRegistering;
+  $('#registerFullName').required = isRegistering;
+  $('#registerUsername').required = isRegistering;
+  $('#registerEmail').required = isRegistering;
+  $('#loginPassword').autocomplete = isRegistering ? 'new-password' : 'current-password';
+  $('#loginPassword').placeholder = isRegistering ? 'Create a password' : 'Enter your password';
+}
+
+function syncAuthHint() {
+  const hint = $('#authHint');
+
+  if (authMode === 'supabase') {
+    hint.innerHTML = `
+      <strong>Supabase Auth</strong>
+      <span>Log in or register with email and password.</span>
+    `;
+    return;
+  }
+
+  hint.innerHTML = `
+    <strong>Demo fallback</strong>
+    <span>Set your Supabase URL/key in supabase-config.js. For now: ava@unigroup.test / password123</span>
+  `;
+}
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]);
+}
+
 function bindNavigation() {
   $all('.nav-link').forEach(btn => {
     btn.addEventListener('click', () => {
       navigateToSection(btn.dataset.section);
     });
   });
+  $('#statMembersBtn').addEventListener('click', () => navigateToSection('members'));
   $('#statInitialiserBtn').addEventListener('click', () => navigateToSection('calls'));
   syncPageMeetingBox();
 }
 
 function bindAddDeadlineModal() {
-  $('#addDeadlineWeekday').innerHTML = WEEKDAYS.map((d, i) => `<option value="${i}">${d}</option>`).join('');
   $('#addMyDeadlineBtn').addEventListener('click', () => {
+    const currentMember = getActiveTeamMembers().find(member => String(member.id) === String(currentUser?.id));
+    $('#addDeadlineDate').value = currentMember?.deadline || '';
+    $('#addDeadlineFeedback').textContent = '';
     $('#addDeadlineModal').classList.remove('hidden');
   });
   $('#closeAddDeadlineModal').addEventListener('click', () => {
@@ -197,27 +622,243 @@ function bindAddDeadlineModal() {
   $('#addDeadlineModal').addEventListener('click', e => {
     if (e.target.id === 'addDeadlineModal') $('#addDeadlineModal').classList.add('hidden');
   });
-  $('#addDeadlineForm').addEventListener('submit', e => {
+  $('#addDeadlineForm').addEventListener('submit', async e => {
     e.preventDefault();
-    const due = Number($('#addDeadlineWeekday').value);
-    const idx = appData.heatmapMembers.findIndex(m => m.name === 'Me');
-    if (idx >= 0) appData.heatmapMembers[idx].dueWeekday = due;
-    else appData.heatmapMembers.push({ name: 'Me', dueWeekday: due });
-    $('#addDeadlineModal').classList.add('hidden');
-    renderHeatmap();
+    const deadline = $('#addDeadlineDate').value;
+    $('#addDeadlineFeedback').textContent = 'Saving...';
+
+    try {
+      await saveCurrentUserDeadline(deadline);
+      $('#addDeadlineFeedback').textContent = '';
+      $('#addDeadlineModal').classList.add('hidden');
+      renderMemberDrivenViews();
+    } catch (error) {
+      $('#addDeadlineFeedback').textContent = error.message || 'Could not save your deadline.';
+    }
   });
 }
 
 function workloadClass(level) {
-  return `${level.toLowerCase()}-pill`;
+  const normalized = String(level || '').toLowerCase();
+  if (['low', 'medium', 'high'].includes(normalized)) return `${normalized}-pill`;
+  return 'neutral-pill';
+}
+
+function getMemberInitials(name) {
+  return String(name || '?')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0].toUpperCase())
+    .join('') || '?';
+}
+
+function normalizeTeamMember(member) {
+  const name = member.full_name || member.name || member.username || member.email || 'Team member';
+  return {
+    id: member.user_id || member.id,
+    username: member.username || '',
+    name,
+    email: member.email || '',
+    role: member.role || 'Team member',
+    currentTask: member.current_task || member.currentTask || '',
+    stage: member.stage || 'Not set',
+    deadline: member.deadline || '',
+    workload: member.workload || 'Not set',
+    initials: member.initials || getMemberInitials(name),
+    isLeader: Boolean(member.is_leader),
+    isCreator: Boolean(member.is_creator)
+  };
+}
+
+function getActiveTeamMembers() {
+  if (supabaseClient) return teamMembers;
+  return appData.members;
+}
+
+function syncMemberDependentInputs() {
+  const members = getActiveTeamMembers();
+  const assigneeSelect = $('#taskAssignee');
+  const catchupSelect = $('#catchupMember');
+  const selectedAssignee = assigneeSelect?.value || 'N/A';
+  const selectedCatchupMember = catchupSelect?.value || '';
+
+  if (assigneeSelect) {
+    assigneeSelect.innerHTML = '<option value="N/A">N/A</option>' + members.map(member => `
+      <option value="${escapeHtml(member.name)}">${escapeHtml(member.name)}</option>
+    `).join('');
+    assigneeSelect.value = [...assigneeSelect.options].some(option => option.value === selectedAssignee)
+      ? selectedAssignee
+      : 'N/A';
+  }
+
+  if (catchupSelect) {
+    if (!members.length) {
+      catchupSelect.innerHTML = '<option value="">No team members yet</option>';
+      catchupSelect.disabled = true;
+    } else {
+      catchupSelect.disabled = false;
+      catchupSelect.innerHTML = members.map(member => `
+        <option value="${escapeHtml(member.name)}">${escapeHtml(member.name)}</option>
+      `).join('');
+      catchupSelect.value = [...catchupSelect.options].some(option => option.value === selectedCatchupMember)
+        ? selectedCatchupMember
+        : catchupSelect.options[0].value;
+    }
+  }
+}
+
+function renderMemberDrivenViews() {
+  syncMemberDependentInputs();
+  renderDashboard();
+  renderMembersDirectory();
+  renderHeatmap();
+}
+
+function canManageActiveGroup() {
+  const group = getActiveGroup();
+  if (!group || !currentUser) return false;
+  return group.createdBy === currentUser.id || group.leaderId === currentUser.id;
+}
+
+function getLeaderLabel() {
+  const leader = getActiveTeamMembers().find(member => member.isLeader);
+  return leader ? leader.name : 'No leader set';
+}
+
+function isMissingRpcError(error, functionName) {
+  const message = error?.message || '';
+  return message.includes(`Could not find the function public.${functionName}`) || message.includes('schema cache');
+}
+
+async function loadTeamMembersFromTables(groupId) {
+  const { data: membershipRows, error: membershipError } = await supabaseClient
+    .from('chat_group_members')
+    .select('user_id')
+    .eq('group_id', groupId);
+
+  if (membershipError) throw membershipError;
+
+  const userIds = [...new Set((membershipRows || []).map(row => row.user_id).filter(Boolean))];
+  if (!userIds.length) return [];
+
+  const { data: profileRows, error: profileError } = await supabaseClient
+    .from('profiles')
+    .select('id, username, full_name, email, role')
+    .in('id', userIds);
+
+  if (profileError) throw profileError;
+
+  const group = getActiveGroup();
+  return (profileRows || []).map(profile => normalizeTeamMember({
+    ...profile,
+    is_leader: profile.id === group?.leaderId,
+    is_creator: profile.id === group?.createdBy
+  }));
+}
+
+async function addMemberByEmailFallback(groupId, email) {
+  const { data: profile, error: profileError } = await supabaseClient
+    .from('profiles')
+    .select('id, email, full_name, username')
+    .ilike('email', email)
+    .maybeSingle();
+
+  if (profileError) throw profileError;
+  if (!profile) throw new Error('No user found with that email.');
+
+  const { error: membershipError } = await supabaseClient
+    .from('chat_group_members')
+    .insert({
+      group_id: groupId,
+      user_id: profile.id,
+      added_by: currentUser.id
+    });
+
+  if (membershipError && !String(membershipError.message || '').toLowerCase().includes('duplicate')) {
+    throw membershipError;
+  }
+
+  return {
+    added_user_id: profile.id,
+    added_email: profile.email,
+    added_full_name: profile.full_name || profile.username || profile.email
+  };
+}
+
+async function saveCurrentUserDeadline(deadline) {
+  const normalizedDeadline = deadline || null;
+  const activeMember = getActiveTeamMembers().find(member => String(member.id) === String(currentUser?.id));
+
+  if (!supabaseClient || !currentUser) {
+    const target = appData.members.find(member => String(member.id) === String(currentUser?.id));
+    if (!target) throw new Error('Could not find your profile.');
+    target.deadline = normalizedDeadline || '';
+    return;
+  }
+
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) {
+    throw new Error('Select a team first.');
+  }
+
+  const rpcPayload = {
+    p_group_id: activeGroup.id,
+    p_user_id: currentUser.id,
+    p_role: activeMember?.role || '',
+    p_current_task: activeMember?.currentTask || '',
+    p_stage: activeMember?.stage || 'Not set',
+    p_workload: activeMember?.workload || 'Not set',
+    p_deadline: normalizedDeadline
+  };
+
+  const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', rpcPayload);
+
+  if (error) {
+    const { error: fallbackError } = await supabaseClient
+      .from('chat_group_member_profiles')
+      .upsert({
+        group_id: activeGroup.id,
+        user_id: currentUser.id,
+        role: activeMember?.role || null,
+        current_task: activeMember?.currentTask || null,
+        stage: activeMember?.stage || 'Not set',
+        workload: activeMember?.workload || 'Not set',
+        deadline: normalizedDeadline,
+        updated_by: currentUser.id,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'group_id,user_id' });
+
+    if (fallbackError) {
+      throw error;
+    }
+
+    await loadTeamMembersForActiveGroup();
+    return;
+  }
+
+  const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
+  teamMembers = teamMembers.map(member => String(member.id) === String(currentUser.id) ? savedMember : member);
 }
 
 function renderDashboard() {
-  $('#statMembers').textContent = appData.members.length;
+  const members = getActiveTeamMembers();
+  const activeGroup = getActiveGroup();
+
+  $('#statMembers').textContent = members.length;
   $('#statTasks').textContent = appData.tasks.length;
   $('#statMeetingTime').textContent = computeSuggestedMeeting().label;
 
-  $('#memberCards').innerHTML = appData.members.map(member => `
+  if (supabaseClient && !activeGroup) {
+    $('#memberCards').innerHTML = '<p class="muted">Select a group chat to see that team on the dashboard.</p>';
+  } else if (teamMembersLoading) {
+    $('#memberCards').innerHTML = '<p class="muted">Loading team members...</p>';
+  } else if (teamMembersError) {
+    $('#memberCards').innerHTML = `<p class="muted">${escapeHtml(teamMembersError)}</p>`;
+  } else if (!members.length) {
+    $('#memberCards').innerHTML = '<p class="muted">No team members in this group yet.</p>';
+  } else {
+    $('#memberCards').innerHTML = members.map(member => `
     <div class="member-card">
       <div class="member-top">
         <div style="display:flex; gap:10px; align-items:center;">
@@ -229,11 +870,13 @@ function renderDashboard() {
         </div>
         <span class="pill ${workloadClass(member.workload)}">${member.workload}</span>
       </div>
-      <p><strong>Current:</strong> ${member.currentTask}</p>
-      <p><strong>Stage:</strong> ${member.stage}</p>
+      <p><strong>Email:</strong> ${escapeHtml(member.email || 'Not set')}</p>
+      <p><strong>Current:</strong> ${escapeHtml(member.currentTask || 'Not set')}</p>
+      <p><strong>Stage:</strong> ${escapeHtml(member.stage || 'Not set')}</p>
       <p><strong>Deadline:</strong> ${formatShortDate(member.deadline)}</p>
     </div>
-  `).join('');
+    `).join('');
+  }
 
   $('#taskSnapshot').innerHTML = appData.tasks.slice(0, 5).map(task => `
     <div class="snapshot-item">
@@ -244,13 +887,356 @@ function renderDashboard() {
   `).join('');
 }
 
+function renderMembersDirectory() {
+  const members = getActiveTeamMembers();
+  const activeGroup = getActiveGroup();
+  const container = $('#memberDirectory');
+  const canManage = canManageActiveGroup();
+  const teamMeta = $('#teamManagementMeta');
+  $('#openAddMemberFromTeam').disabled = !activeGroup;
+
+  if (supabaseClient && !activeGroup) {
+    teamMeta.textContent = 'Select a group to manage its team.';
+    container.innerHTML = '<p class="muted">Select a group chat first. The Team Members page always shows the currently selected team.</p>';
+    return;
+  }
+
+  if (teamMembersLoading) {
+    teamMeta.textContent = activeGroup ? `Loading team for ${activeGroup.name}...` : 'Loading team...';
+    container.innerHTML = '<p class="muted">Loading team members...</p>';
+    return;
+  }
+
+  if (teamMembersError) {
+    teamMeta.textContent = 'There is a problem loading this team.';
+    container.innerHTML = `<p class="muted">${escapeHtml(teamMembersError)}</p>`;
+    return;
+  }
+
+  if (activeGroup) {
+    const leaderNote = members.length ? `Leader: ${getLeaderLabel()}` : 'No members yet';
+    teamMeta.textContent = `${activeGroup.name} · ${leaderNote}`;
+  } else {
+    teamMeta.textContent = 'Demo team';
+  }
+
+  if (!members.length) {
+    container.innerHTML = '<p class="muted">No team members found for this group yet.</p>';
+    return;
+  }
+
+  container.innerHTML = members.map(member => `
+    <form class="member-directory-item member-editor" data-member-id="${member.id}">
+      <div class="member-directory-top">
+        <div class="avatar">${member.initials}</div>
+        <div>
+          <strong>${escapeHtml(member.name)}</strong>
+          <div class="muted">${escapeHtml(member.email || 'No email saved')}</div>
+        </div>
+      </div>
+      <div class="member-card-badges">
+        <span class="badge ${member.isLeader ? 'leader-badge' : ''}">${member.isLeader ? 'Leader' : (member.role || 'Team member')}</span>
+        ${member.isCreator ? '<span class="badge">Creator</span>' : ''}
+      </div>
+      <div class="member-editor-grid">
+        <label class="stack-label">Role
+          <input name="role" type="text" value="${escapeHtml(member.role || '')}" ${supabaseClient ? '' : 'data-local-only="true"'} />
+        </label>
+        <label class="stack-label">Current task
+          <input name="currentTask" type="text" value="${escapeHtml(member.currentTask || '')}" ${supabaseClient ? '' : 'data-local-only="true"'} />
+        </label>
+        <label class="stack-label">Stage
+          <select name="stage">
+            ${MEMBER_STAGES.map(stage => `<option value="${stage}" ${member.stage === stage ? 'selected' : ''}>${stage}</option>`).join('')}
+          </select>
+        </label>
+        <label class="stack-label">Workload
+          <select name="workload">
+            ${MEMBER_WORKLOADS.map(level => `<option value="${level}" ${member.workload === level ? 'selected' : ''}>${level}</option>`).join('')}
+          </select>
+        </label>
+        <label class="stack-label">Deadline
+          <input name="deadline" type="date" value="${member.deadline || ''}" />
+        </label>
+      </div>
+      <div class="member-editor-actions">
+        <div class="member-card-actions">
+          <button class="small-btn member-card-action" type="submit">Save</button>
+          ${supabaseClient && canManage && !member.isLeader ? '<button class="secondary-btn member-card-action" type="button" data-action="set-leader">Set leader</button>' : ''}
+          ${supabaseClient && canManage && !member.isCreator ? '<button class="danger-btn member-card-action" type="button" data-action="remove-member">Remove</button>' : ''}
+        </div>
+        <p class="feedback-text member-save-feedback" role="status"></p>
+      </div>
+    </form>
+  `).join('');
+}
+
+async function initDatabaseChat() {
+  if (!supabaseClient || !currentUser) return;
+  if (chatInitInProgress) return;
+  chatInitInProgress = true;
+  console.time('chat:init');
+  try {
+    await loadChatMemberDirectory();
+    await loadChatFromDatabase();
+    subscribeToChatChanges();
+  } finally {
+    chatInitInProgress = false;
+    console.timeEnd('chat:init');
+  }
+}
+
+async function loadTeamMembersForActiveGroup() {
+  if (!supabaseClient || !currentUser) {
+    teamMembers = [...appData.members];
+    teamMembersError = '';
+    teamMembersLoading = false;
+    loadedTeamMembersGroupId = null;
+    renderMemberDrivenViews();
+    return;
+  }
+
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) {
+    teamMembers = [];
+    teamMembersError = '';
+    teamMembersLoading = false;
+    loadedTeamMembersGroupId = null;
+    renderMemberDrivenViews();
+    return;
+  }
+
+  teamMembersLoading = true;
+  teamMembersError = '';
+  loadedTeamMembersGroupId = activeGroup.id;
+  renderMemberDrivenViews();
+
+  const { data, error } = await supabaseClient.rpc('get_chat_group_members', {
+    target_group_id: activeGroup.id
+  });
+
+  if (error) {
+    if (isMissingRpcError(error, 'get_chat_group_members')) {
+      try {
+        const fallbackMembers = await loadTeamMembersFromTables(activeGroup.id);
+        if (loadedTeamMembersGroupId !== activeGroup.id) return;
+        teamMembers = fallbackMembers;
+        teamMembersError = fallbackMembers.length
+          ? ''
+          : 'Team members RPC is not installed yet. Showing what could be read from the current tables.';
+        teamMembersLoading = false;
+        renderMemberDrivenViews();
+        return;
+      } catch (fallbackError) {
+        teamMembers = [];
+        teamMembersError = 'Team members RPC is missing in Supabase, and the fallback table query also failed.';
+        teamMembersLoading = false;
+        renderMemberDrivenViews();
+        return;
+      }
+    }
+
+    teamMembers = [];
+    teamMembersError = error.message || 'Could not load team members.';
+    teamMembersLoading = false;
+    renderMemberDrivenViews();
+    return;
+  }
+
+  if (loadedTeamMembersGroupId !== activeGroup.id) return;
+
+  teamMembers = (data || []).map(normalizeTeamMember);
+  teamMembersLoading = false;
+  teamMembersError = '';
+  renderMemberDrivenViews();
+}
+
+async function loadChatMemberDirectory() {
+  if (!supabaseClient || !currentUser) return;
+
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('id, username, full_name, email')
+    .order('full_name', { ascending: true });
+
+  if (error) {
+    console.warn('Could not load chat member directory:', error.message);
+    availableChatMembers = [];
+    renderGroupMemberPicker();
+    return;
+  }
+
+  availableChatMembers = data || [];
+  renderGroupMemberPicker();
+}
+
+function renderGroupMemberPicker() {
+  const picker = $('#groupMemberPicker');
+  if (!picker) return;
+
+  const selectableMembers = availableChatMembers.filter(member => member.id !== currentUser?.id);
+
+  if (!supabaseClient || !currentUser) {
+    picker.innerHTML = '<p class="member-picker-empty">Sign in to choose group members.</p>';
+    return;
+  }
+
+  if (!selectableMembers.length) {
+    picker.innerHTML = '<p class="member-picker-empty">No other users found yet.</p>';
+    return;
+  }
+
+  picker.innerHTML = selectableMembers.map(member => `
+    <label class="member-picker-option">
+      <input type="checkbox" class="group-member-checkbox" value="${member.id}" />
+      <span>
+        <strong>${escapeHtml(member.full_name || member.username || member.email)}</strong>
+        <span class="muted">${escapeHtml(member.username || member.email)}</span>
+      </span>
+    </label>
+  `).join('');
+}
+
+function teardownDatabaseChat() {
+  if (!supabaseClient || !chatSubscription) return;
+  supabaseClient.removeChannel(chatSubscription);
+  chatSubscription = null;
+}
+
+function subscribeToChatChanges() {
+  if (!supabaseClient || chatSubscription) return;
+
+  const reloadChat = debounce(() => {
+    loadChatFromDatabase();
+  }, 250);
+
+  chatSubscription = supabaseClient
+    .channel('unigroup-chat-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_groups' }, reloadChat)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_members' }, reloadChat)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_member_profiles' }, reloadChat)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_channels' }, reloadChat)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, reloadChat)
+    .subscribe();
+}
+
+async function loadChatFromDatabase() {
+  if (!supabaseClient || !currentUser) return;
+
+  const loadVersion = ++chatLoadVersion;
+  chatLoading = true;
+  chatLoadError = '';
+  console.time('chat:loadFromDatabase');
+
+  try {
+    const { data: chatState, error: chatStateError } = await supabaseClient.rpc('get_my_chat_state');
+    if (chatStateError) throw chatStateError;
+
+    const groups = chatState?.groups || [];
+    const channels = chatState?.channels || [];
+    const messages = chatState?.messages || [];
+
+    if (!groups.length) {
+      if (loadVersion !== chatLoadVersion) return;
+      appData.groups = [];
+      activeGroupId = null;
+      activeChannelId = null;
+      await loadTeamMembersForActiveGroup();
+      return;
+    }
+
+    if (loadVersion !== chatLoadVersion) return;
+    appData.groups = mapChatRowsToGroups(groups, channels, messages);
+    ensureActiveChatSelection();
+    await loadTeamMembersForActiveGroup();
+  } catch (error) {
+    if (loadVersion !== chatLoadVersion) return;
+    chatLoadError = error.message || 'Could not load chat from Supabase.';
+    console.error('Chat load failed:', error);
+  } finally {
+    if (loadVersion !== chatLoadVersion) return;
+    chatLoading = false;
+    console.timeEnd('chat:loadFromDatabase');
+    renderChat();
+  }
+}
+
+function mapChatRowsToGroups(groups, channels, messages) {
+  const channelsByGroup = channels.reduce((acc, channel) => {
+    if (!acc[channel.group_id]) acc[channel.group_id] = [];
+    acc[channel.group_id].push(channel);
+    return acc;
+  }, {});
+
+  const messagesByChannel = messages.reduce((acc, message) => {
+    if (!acc[message.channel_id]) acc[message.channel_id] = [];
+    acc[message.channel_id].push(message);
+    return acc;
+  }, {});
+
+  return groups.map(group => ({
+    id: group.id,
+    name: group.name,
+    createdBy: group.created_by || null,
+    leaderId: group.leader_id || group.created_by || null,
+    channels: (channelsByGroup[group.id] || []).map(channel => ({
+      id: channel.id,
+      name: channel.name,
+      messages: (messagesByChannel[channel.id] || []).map(message => ({
+        id: message.id,
+        senderId: message.sender_id,
+        sender: message.sender_name,
+        text: message.body,
+        time: formatChatTimestamp(message.created_at),
+        date: message.created_at.slice(0, 10),
+        createdAt: message.created_at
+      }))
+    }))
+  }));
+}
+
+function ensureActiveChatSelection() {
+  if (!appData.groups.length) {
+    activeGroupId = null;
+    activeChannelId = null;
+    return;
+  }
+
+  if (!appData.groups.some(group => group.id === activeGroupId)) {
+    activeGroupId = appData.groups[0].id;
+  }
+
+  const activeGroup = getActiveGroup();
+  if (!activeGroup?.channels.length) {
+    activeChannelId = null;
+    return;
+  }
+
+  if (!activeGroup.channels.some(channel => channel.id === activeChannelId)) {
+    activeChannelId = activeGroup.channels[0].id;
+  }
+}
+
+function debounce(fn, delay) {
+  let timer = null;
+  return (...args) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), delay);
+  };
+}
+
 function getActiveGroup() {
-  return appData.groups.find(g => g.id === activeGroupId) || appData.groups[0];
+  return appData.groups.find(g => g.id === activeGroupId) || appData.groups[0] || null;
 }
 function getActiveChannel() {
-  return getActiveGroup().channels.find(c => c.id === activeChannelId) || getActiveGroup().channels[0];
+  const activeGroup = getActiveGroup();
+  return activeGroup?.channels.find(c => c.id === activeChannelId) || activeGroup?.channels[0] || null;
+}
+function isCurrentUserSender(sender) {
+  return sender === 'You' || (currentUser && sender === currentUser.name);
 }
 function getGroupMessages(group = getActiveGroup()) {
+  if (!group) return [];
   return group.channels.flatMap(channel =>
     channel.messages.map(message => ({
       ...message,
@@ -274,6 +1260,7 @@ function getTodayMessages() {
   );
 }
 function getActiveGroupSummary(group = getActiveGroup()) {
+  if (!group) return 'Create a group chat to start building a daily summary.';
   if (group.id === 2) {
     return 'COMP Project Beta spent today tightening the prototype for presentation: testing feedback was reviewed, slide timing was shortened, and the reminder mock was requested for the final deck.';
   }
@@ -286,10 +1273,47 @@ function syncChatModeVisibility() {
 function renderChat() {
   const activeGroup = getActiveGroup();
   const groupMessages = getGroupMessages(activeGroup);
+  $('#openAddMemberBtn').disabled = !activeGroup;
+
+  if (chatLoadError) {
+    $('#groupList').innerHTML = `<p class="muted">${escapeHtml(chatLoadError)}</p>`;
+    $('#chatTitle').textContent = 'Group Chat';
+    $('#chatGroupLabel').textContent = 'Database connection needs attention';
+    $('#messageCountBadge').textContent = '0 messages';
+    $('#chatMessages').innerHTML = `<p class="muted">Check your Supabase chat tables and policies, then refresh.</p>`;
+    renderChatUtilityPanel();
+    syncChatUtilityButtons();
+    syncChatModeVisibility();
+    return;
+  }
+
+  if (chatLoading && supabaseClient && !appData.groups.length) {
+    $('#groupList').innerHTML = '<p class="muted">Loading groups...</p>';
+    $('#chatTitle').textContent = 'Group Chat';
+    $('#chatGroupLabel').textContent = 'Loading Supabase messages';
+    $('#messageCountBadge').textContent = '0 messages';
+    $('#chatMessages').innerHTML = '<p class="muted">Fetching messages...</p>';
+    renderChatUtilityPanel();
+    syncChatUtilityButtons();
+    syncChatModeVisibility();
+    return;
+  }
+
+  if (!activeGroup) {
+    $('#groupList').innerHTML = '<p class="muted">No groups yet. Create one to start chatting.</p>';
+    $('#chatTitle').textContent = 'No group selected';
+    $('#chatGroupLabel').textContent = 'Create a group to begin';
+    $('#messageCountBadge').textContent = '0 messages';
+    $('#chatMessages').innerHTML = '<p class="muted">Messages will appear here after a group is created.</p>';
+    renderChatUtilityPanel();
+    syncChatUtilityButtons();
+    syncChatModeVisibility();
+    return;
+  }
 
   $('#groupList').innerHTML = appData.groups.map(group => `
     <button class="group-item ${group.id === activeGroupId ? 'active' : ''}" data-group-id="${group.id}">
-      <strong>${group.name}</strong><br />
+      <strong>${escapeHtml(group.name)}</strong><br />
       <small class="muted">${getGroupMessages(group).length} messages</small>
     </button>
   `).join('');
@@ -298,11 +1322,11 @@ function renderChat() {
   $('#chatGroupLabel').textContent = 'All group messages';
   $('#messageCountBadge').textContent = `${groupMessages.length} messages`;
   $('#chatMessages').innerHTML = groupMessages.map(msg => `
-    <div class="message ${msg.sender === 'You' ? 'self' : ''}">
-      <span class="message-channel"># ${msg.channelName}</span>
-      <strong>${msg.sender}</strong>
-      <div>${msg.text}</div>
-      <small>${msg.time}</small>
+    <div class="message ${isCurrentUserSender(msg.sender) ? 'self' : ''}">
+      <span class="message-channel"># ${escapeHtml(msg.channelName)}</span>
+      <strong>${escapeHtml(msg.sender)}</strong>
+      <div>${escapeHtml(msg.text)}</div>
+      <small>${escapeHtml(msg.time)}</small>
     </div>
   `).join('');
   renderChatUtilityPanel();
@@ -311,15 +1335,17 @@ function renderChat() {
 
   $all('.group-item').forEach(btn => {
     btn.addEventListener('click', () => {
-      activeGroupId = Number(btn.dataset.groupId);
-      activeChannelId = getActiveGroup().channels[0].id;
+      activeGroupId = btn.dataset.groupId;
+      activeChannelId = getActiveGroup()?.channels[0]?.id || null;
       renderChat();
+      loadTeamMembersForActiveGroup();
     });
   });
 }
 
 function renderChatUtilityPanel() {
   const panel = $('#chatUtilityPanel');
+  const activeGroup = getActiveGroup();
 
   if (activeChatUtility === 'chat') {
     panel.innerHTML = '';
@@ -329,8 +1355,17 @@ function renderChatUtilityPanel() {
 
   panel.classList.remove('hidden');
 
+  if (!activeGroup) {
+    panel.innerHTML = `
+      <div class="chat-utility-card">
+        <p class="chat-utility-summary">Create a group chat to use reminders and summaries.</p>
+      </div>
+    `;
+    return;
+  }
+
   if (activeChatUtility === 'summary') {
-    const todayMessages = getTodayMessages().filter(message => message.groupName === getActiveGroup().name);
+    const todayMessages = getTodayMessages().filter(message => message.groupName === activeGroup.name);
     panel.innerHTML = `
       <div class="chat-utility-card">
         <div class="chat-utility-header">
@@ -345,7 +1380,7 @@ function renderChatUtilityPanel() {
     return;
   }
 
-  const reminders = getMentionMessages().filter(message => message.groupName === getActiveGroup().name);
+  const reminders = getMentionMessages().filter(message => message.groupName === activeGroup.name);
   panel.innerHTML = `
     <div class="chat-utility-card">
       <div class="chat-utility-header">
@@ -371,13 +1406,58 @@ function syncChatUtilityButtons() {
 }
 
 function bindChat() {
-  $('#chatForm').addEventListener('submit', e => {
+  $('#chatForm').addEventListener('submit', async e => {
     e.preventDefault();
     const input = $('#chatInput');
     const text = input.value.trim();
     if (!text) return;
+
+    if (supabaseClient && currentUser) {
+      ensureActiveChatSelection();
+      const activeGroup = getActiveGroup();
+      const activeChannel = getActiveChannel();
+
+      if (!activeGroup || !activeChannel) {
+        chatLoadError = 'Create or select a group before sending a message.';
+        renderChat();
+        return;
+      }
+
+      const { data: messageData, error } = await supabaseClient.rpc('send_chat_message', {
+        target_group_id: activeGroup.id,
+        target_channel_id: activeChannel.id,
+        message_body: text,
+        sender_display_name: currentUser.name
+      });
+
+      if (error) {
+        chatLoadError = error.message;
+        renderChat();
+        return;
+      }
+
+      const createdMessage = Array.isArray(messageData) ? messageData[0] : messageData;
+      chatLoadVersion += 1;
+      activeChannel.messages.push({
+        id: createdMessage?.message_id || `local-${Date.now()}`,
+        senderId: currentUser.id,
+        sender: currentUser.name,
+        text,
+        time: formatChatTimestamp(createdMessage?.created_at || new Date().toISOString()),
+        date: (createdMessage?.created_at || new Date().toISOString()).slice(0, 10),
+        createdAt: createdMessage?.created_at || new Date().toISOString(),
+        channelId: activeChannel.id,
+        channelName: activeChannel.name
+      });
+      input.value = '';
+      chatLoadError = '';
+      renderChat();
+      loadChatFromDatabase();
+      return;
+    }
+
     getActiveChannel().messages.push({
-      sender: 'You',
+      sender: currentUser ? currentUser.name : 'You',
       text,
       time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       date: '2026-04-01'
@@ -397,9 +1477,37 @@ function bindChat() {
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-/** Days until due from this weekday (same week). Blue ≥4 days away, yellow 1–3 days, due = red, after due = free. */
-function heatmapDayState(dueWeekday, dayIndex) {
-  const daysUntil = dueWeekday - dayIndex;
+function startOfWeek(referenceDate = new Date()) {
+  const date = new Date(referenceDate);
+  date.setHours(0, 0, 0, 0);
+  const weekday = date.getDay();
+  const mondayOffset = weekday === 0 ? -6 : 1 - weekday;
+  date.setDate(date.getDate() + mondayOffset);
+  return date;
+}
+
+function buildHeatmapWeekDates() {
+  const monday = startOfWeek(new Date());
+  return WEEKDAYS.map((_, index) => {
+    const day = new Date(monday);
+    day.setDate(monday.getDate() + index);
+    return day;
+  });
+}
+
+function parseDateOnly(dateStr) {
+  if (!dateStr) return null;
+  const parsed = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+}
+
+/** Days until due from this date. Blue ≥4 days away, yellow 1–3 days, due = red, after due = free. */
+function heatmapDayState(deadlineDate, dayDate) {
+  if (!deadlineDate) return 'free';
+  const dayMs = 24 * 60 * 60 * 1000;
+  const daysUntil = Math.round((deadlineDate.getTime() - dayDate.getTime()) / dayMs);
   if (daysUntil < 0) return 'free';
   if (daysUntil === 0) return 'due';
   if (daysUntil >= 4) return 'far';
@@ -407,10 +1515,23 @@ function heatmapDayState(dueWeekday, dayIndex) {
 }
 
 function renderHeatmap() {
-  const headerCells = WEEKDAYS.map(d => `<div class="heatmap-head">${d}</div>`).join('');
-  const rows = appData.heatmapMembers.map(member => {
-    const cells = WEEKDAYS.map((_, dayIndex) => {
-      const state = heatmapDayState(member.dueWeekday, dayIndex);
+  const members = getActiveTeamMembers();
+  const activeGroup = getActiveGroup();
+
+  if (supabaseClient && !activeGroup) {
+    $('#heatmapCalendar').innerHTML = '<p class="muted">Select a team chat first to see the real deadline heatmap.</p>';
+    $('#memberTimetables').innerHTML = '<p class="muted">Team workload will appear here once a team is selected.</p>';
+    return;
+  }
+
+  const weekDates = buildHeatmapWeekDates();
+  const headerCells = weekDates.map((day, index) => `
+    <div class="heatmap-head">${WEEKDAYS[index]}, ${day.toLocaleDateString([], { day: 'numeric', month: 'short' })}</div>
+  `).join('');
+  const rows = members.map(member => {
+    const deadlineDate = parseDateOnly(member.deadline);
+    const cells = weekDates.map(dayDate => {
+      const state = heatmapDayState(deadlineDate, dayDate);
       if (state === 'free') {
         return '<div class="heatmap-cell heatmap-free" title="Free from tasks"><span class="heatmap-check">✓</span></div>';
       }
@@ -429,6 +1550,12 @@ function renderHeatmap() {
       </div>`;
   }).join('');
 
+  if (!members.length) {
+    $('#heatmapCalendar').innerHTML = '<p class="muted">No team members available for this heatmap yet.</p>';
+    $('#memberTimetables').innerHTML = '<p class="muted">No team workload data yet.</p>';
+    return;
+  }
+
   $('#heatmapCalendar').innerHTML = `
     <div class="heatmap-table">
       <div class="heatmap-row heatmap-row-head">
@@ -439,21 +1566,21 @@ function renderHeatmap() {
     </div>
   `;
 
-  $('#memberTimetables').innerHTML = appData.members.map(member => {
-    const width = member.workload === 'High' ? 88 : member.workload === 'Medium' ? 60 : 32;
-    const className = member.workload.toLowerCase();
+  $('#memberTimetables').innerHTML = members.map(member => {
+    const width = member.workload === 'High' ? 88 : member.workload === 'Medium' ? 60 : member.workload === 'Low' ? 32 : 16;
+    const className = ['high', 'medium', 'low'].includes(String(member.workload).toLowerCase()) ? member.workload.toLowerCase() : 'neutral';
     return `
       <div class="timetable-card">
         <h4>${member.name}</h4>
-        <p class="muted">Current task: ${member.currentTask}</p>
+        <p class="muted">Current task: ${member.currentTask || 'Not set'}</p>
         <div class="timetable-bars">
           <div>Workload this week</div>
           <div class="bar-track"><div class="bar-fill ${className}" style="width:${width}%"></div></div>
-          <small>Deadline: ${formatShortDate(member.deadline)} · ${member.workload} stress</small>
+          <small>Deadline: ${formatShortDate(member.deadline)} · ${member.workload || 'Not set'}</small>
         </div>
       </div>
     `;
-  }).join('');
+  }).join('') || '<p class="muted">No team workload data yet.</p>';
 }
 
 function bindMeeting() {
@@ -606,7 +1733,7 @@ function renderCalls() {
 }
 
 function bindTasks() {
-  $('#taskAssignee').innerHTML = '<option value="N/A">N/A</option>' + appData.members.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+  syncMemberDependentInputs();
   $('#taskForm').addEventListener('submit', e => {
     e.preventDefault();
     const assignee = $('#taskAssignee').value;
@@ -798,12 +1925,16 @@ function renderTasks() {
 }
 
 function bindCatchup() {
-  $('#catchupMember').innerHTML = appData.members.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+  syncMemberDependentInputs();
   $('#generateCatchup').addEventListener('click', renderCatchupSummary);
 }
 
 function renderCatchupSummary() {
   const member = $('#catchupMember').value;
+  if (!member) {
+    $('#catchupSummary').innerHTML = '<div class="summary-card"><p>Select a team member to generate a summary.</p></div>';
+    return;
+  }
   const taskItems = appData.tasks.filter(t => t.assignee === member || t.status !== 'Done').slice(0, 3);
   const meeting = computeSuggestedMeeting();
   $('#catchupSummary').innerHTML = `
@@ -828,18 +1959,81 @@ function renderCatchupHighlights() {
 
 function bindGroupModal() {
   const openers = ['#openCreateGroupInline'];
-  openers.forEach(id => $(id).addEventListener('click', () => $('#groupModal').classList.remove('hidden')));
+  openers.forEach(id => $(id).addEventListener('click', () => {
+    renderGroupMemberPicker();
+    $('#groupModal').classList.remove('hidden');
+  }));
   $('#closeGroupModal').addEventListener('click', () => $('#groupModal').classList.add('hidden'));
   $('#groupModal').addEventListener('click', e => {
     if (e.target.id === 'groupModal') $('#groupModal').classList.add('hidden');
   });
-  $('#groupForm').addEventListener('submit', e => {
+  $('#groupForm').addEventListener('submit', async e => {
     e.preventDefault();
     const name = $('#groupNameInput').value.trim();
     const topic = $('#groupTopicInput').value.trim();
+
+    if (supabaseClient && currentUser) {
+      const selectedMemberIds = [
+        ...$all('.group-member-checkbox:checked').map(input => input.value)
+      ].filter(Boolean);
+
+      const { data: groupData, error: groupError } = await supabaseClient.rpc('create_chat_group', {
+        group_name: name,
+        first_channel_name: topic,
+        member_ids: selectedMemberIds
+      });
+
+      if (groupError) {
+        chatLoadError = groupError.message;
+        renderChat();
+        return;
+      }
+
+      const createdGroup = Array.isArray(groupData) ? groupData[0] : groupData;
+      chatLoadVersion += 1;
+      appData.groups.unshift({
+        id: createdGroup?.group_id,
+        name,
+        createdBy: currentUser.id,
+        leaderId: currentUser.id,
+        channels: [
+          {
+            id: createdGroup?.channel_id,
+            name: topic,
+            messages: [
+              {
+                id: `local-${Date.now()}`,
+                senderId: currentUser.id,
+                sender: 'System',
+                text: `Welcome to ${name}.`,
+                time: 'Now',
+                date: new Date().toISOString().slice(0, 10),
+                createdAt: new Date().toISOString()
+              }
+            ]
+          }
+        ]
+      });
+
+      activeGroupId = createdGroup?.group_id || null;
+      activeChannelId = createdGroup?.channel_id || null;
+      chatLoadError = '';
+      ensureActiveChatSelection();
+      e.target.reset();
+      $('#groupModal').classList.add('hidden');
+      renderChat();
+      await loadChatFromDatabase();
+      ensureActiveChatSelection();
+      await loadTeamMembersForActiveGroup();
+      renderChat();
+      return;
+    }
+
     const newGroup = {
       id: Date.now(),
       name,
+      createdBy: currentUser?.id || null,
+      leaderId: currentUser?.id || null,
       channels: [{ id: `channel-${Date.now()}`, name: topic, messages: [{ sender: 'System', text: `Welcome to ${name}.`, time: 'Now' }] }]
     };
     appData.groups.push(newGroup);
@@ -851,10 +2045,234 @@ function bindGroupModal() {
   });
 }
 
+function bindAddMemberModal() {
+  $('#openAddMemberBtn').addEventListener('click', () => {
+    openAddMemberModal();
+  });
+  $('#openAddMemberFromTeam').addEventListener('click', () => {
+    openAddMemberModal();
+  });
+
+  $('#closeAddMemberModal').addEventListener('click', () => $('#addMemberModal').classList.add('hidden'));
+  $('#addMemberModal').addEventListener('click', e => {
+    if (e.target.id === 'addMemberModal') $('#addMemberModal').classList.add('hidden');
+  });
+
+  $('#addMemberForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const activeGroup = getActiveGroup();
+    const email = $('#addMemberEmail').value.trim().toLowerCase();
+
+    if (!currentUser || !activeGroup) {
+      $('#addMemberFeedback').textContent = 'Select a group and sign in before adding members.';
+      return;
+    }
+
+    $('#addMemberFeedback').textContent = 'Adding member...';
+
+    if (!supabaseClient) {
+      const localUser = getDemoUsers().find(user => user.email.toLowerCase() === email);
+      if (!localUser) {
+        $('#addMemberFeedback').textContent = 'No demo user found with that email.';
+        return;
+      }
+
+      const alreadyPresent = appData.members.some(member => member.email.toLowerCase() === email);
+      if (!alreadyPresent) {
+        appData.members.push(normalizeTeamMember(localUser));
+      }
+
+      $('#addMemberFeedback').textContent = `${localUser.name} added.`;
+      $('#addMemberForm').reset();
+      renderMemberDrivenViews();
+      window.setTimeout(() => {
+        $('#addMemberModal').classList.add('hidden');
+        $('#addMemberFeedback').textContent = '';
+      }, 700);
+      return;
+    }
+
+    let addedMember = null;
+
+    try {
+      const { data, error } = await supabaseClient.rpc('add_chat_group_member_by_email', {
+        target_group_id: activeGroup.id,
+        member_email: email
+      });
+
+      if (error) {
+        if (isMissingRpcError(error, 'add_chat_group_member_by_email')) {
+          addedMember = await addMemberByEmailFallback(activeGroup.id, email);
+        } else {
+          throw error;
+        }
+      } else {
+        addedMember = Array.isArray(data) ? data[0] : data;
+      }
+    } catch (error) {
+      $('#addMemberFeedback').textContent = error.message || 'Could not add that member.';
+      return;
+    }
+
+    $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
+    $('#addMemberForm').reset();
+    chatLoadVersion += 1;
+    loadChatMemberDirectory();
+    await loadChatFromDatabase();
+    await loadTeamMembersForActiveGroup();
+    window.setTimeout(() => {
+      $('#addMemberModal').classList.add('hidden');
+      $('#addMemberFeedback').textContent = '';
+    }, 700);
+  });
+}
+
+function openAddMemberModal() {
+    const activeGroup = getActiveGroup();
+    if (!activeGroup) {
+      chatLoadError = 'Create or select a group before adding members.';
+      renderChat();
+      return;
+    }
+
+    $('#addMemberFeedback').textContent = '';
+    $('#addMemberModal').classList.remove('hidden');
+}
+
+function bindMembersDirectory() {
+  $('#memberDirectory').addEventListener('click', async e => {
+    const button = e.target.closest('[data-action]');
+    if (!button) return;
+
+    const form = button.closest('.member-editor');
+    if (!form) return;
+
+    const feedback = form.querySelector('.member-save-feedback');
+    const memberId = form.dataset.memberId;
+    const activeGroup = getActiveGroup();
+
+    if (!supabaseClient || !currentUser || !activeGroup) {
+      feedback.textContent = 'Open a real group to manage team members.';
+      return;
+    }
+
+    if (button.dataset.action === 'set-leader') {
+      feedback.textContent = 'Updating leader...';
+      const { error } = await supabaseClient.rpc('set_chat_group_leader', {
+        target_group_id: activeGroup.id,
+        target_user_id: memberId
+      });
+
+      if (error) {
+        if (isMissingRpcError(error, 'set_chat_group_leader')) {
+          feedback.textContent = 'Leader management is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
+          return;
+        }
+        feedback.textContent = error.message;
+        return;
+      }
+
+      await loadChatFromDatabase();
+      await loadTeamMembersForActiveGroup();
+      feedback.textContent = 'Leader updated.';
+      return;
+    }
+
+    if (button.dataset.action === 'remove-member') {
+      feedback.textContent = 'Removing member...';
+      const { error } = await supabaseClient.rpc('remove_chat_group_member', {
+        target_group_id: activeGroup.id,
+        target_user_id: memberId
+      });
+
+      if (error) {
+        if (isMissingRpcError(error, 'remove_chat_group_member')) {
+          feedback.textContent = 'Member removal is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
+          return;
+        }
+        feedback.textContent = error.message;
+        return;
+      }
+
+      await loadChatFromDatabase();
+      await loadTeamMembersForActiveGroup();
+      feedback.textContent = 'Member removed.';
+    }
+  });
+
+  $('#memberDirectory').addEventListener('submit', async e => {
+    const form = e.target.closest('.member-editor');
+    if (!form) return;
+    e.preventDefault();
+
+    const feedback = form.querySelector('.member-save-feedback');
+    const memberId = form.dataset.memberId;
+    const members = getActiveTeamMembers();
+    const member = members.find(item => String(item.id) === String(memberId));
+
+    if (!member) {
+      feedback.textContent = 'Could not find that team member.';
+      return;
+    }
+
+    const payload = {
+      role: form.elements.role.value.trim(),
+      currentTask: form.elements.currentTask.value.trim(),
+      stage: form.elements.stage.value,
+      workload: form.elements.workload.value,
+      deadline: form.elements.deadline.value
+    };
+
+    feedback.textContent = 'Saving...';
+
+    if (!supabaseClient || !currentUser) {
+      const target = appData.members.find(item => String(item.id) === String(memberId));
+      if (target) Object.assign(target, payload);
+      feedback.textContent = 'Saved locally.';
+      renderMemberDrivenViews();
+      return;
+    }
+
+    const activeGroup = getActiveGroup();
+    if (!activeGroup) {
+      feedback.textContent = 'Select a team before saving member details.';
+      return;
+    }
+
+    const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', {
+      p_group_id: activeGroup.id,
+      p_user_id: memberId,
+      p_role: payload.role,
+      p_current_task: payload.currentTask,
+      p_stage: payload.stage,
+      p_workload: payload.workload,
+      p_deadline: payload.deadline || null
+    });
+
+    if (error) {
+      if (isMissingRpcError(error, 'upsert_chat_group_member_profile')) {
+        feedback.textContent = 'The save RPC is not installed in Supabase yet. Re-run supabase-chat-schema.sql, then try again.';
+        return;
+      }
+      feedback.textContent = error.message;
+      return;
+    }
+
+    const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
+    teamMembers = teamMembers.map(item => String(item.id) === String(memberId) ? savedMember : item);
+    feedback.textContent = 'Saved.';
+    renderMemberDrivenViews();
+  });
+}
+
 function formatShortDate(dateStr) {
   if (!dateStr) return '—';
   const date = new Date(dateStr);
   return date.toLocaleDateString([], { day: 'numeric', month: 'short' });
+}
+function formatChatTimestamp(dateStr) {
+  if (!dateStr) return 'Now';
+  return new Date(dateStr).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 function formatTime(timeStr) {
   const [h, m] = timeStr.split(':');

@@ -7,7 +7,70 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <section class="login-screen" id="loginScreen">
+    <div class="login-card">
+      <div class="brand login-brand">
+        <div class="brand-badge" aria-hidden="true">
+          <span class="brand-ring brand-ring-one"></span>
+          <span class="brand-ring brand-ring-two"></span>
+          <span class="brand-core">UG</span>
+        </div>
+        <div>
+          <h1>UniGroup Hub</h1>
+          <p>Assignment collaboration</p>
+        </div>
+      </div>
+
+      <div class="login-copy">
+        <p class="mini-label">Welcome back</p>
+        <h2>Sign in to your group workspace</h2>
+        <p class="muted">Use your team account to continue planning deadlines, meetings, chats, and tasks.</p>
+      </div>
+
+      <form id="loginForm" class="stack-form login-form">
+        <div class="register-only hidden">
+          <label class="stack-label">Full name
+            <input id="registerFullName" type="text" autocomplete="name" placeholder="Ava Chen" />
+          </label>
+        </div>
+        <div class="register-only hidden">
+          <label class="stack-label">Username
+            <input id="registerUsername" type="text" autocomplete="username" placeholder="ava" />
+          </label>
+        </div>
+        <div class="register-only hidden">
+          <label class="stack-label">Team name
+            <input id="registerTeamName" type="text" autocomplete="organization" placeholder="INFO2222 Team Alpha" />
+          </label>
+        </div>
+        <label class="stack-label login-only"><span id="authIdentifierLabel">Email</span>
+          <input id="loginEmail" type="email" autocomplete="email" placeholder="student@example.com" required />
+        </label>
+        <div class="register-only hidden">
+          <label class="stack-label">Email
+            <input id="registerEmail" type="email" autocomplete="email" placeholder="student@example.com" />
+          </label>
+        </div>
+        <label class="stack-label">Password
+          <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Enter your password" required />
+        </label>
+        <button class="primary-btn" type="submit" id="authSubmitBtn">Log in</button>
+        <p id="loginFeedback" class="feedback-text login-feedback" role="alert"></p>
+      </form>
+
+      <p class="auth-switch">
+        <span id="authSwitchText">Need an account?</span>
+        <button type="button" class="link-btn" id="toggleAuthMode">Register</button>
+      </p>
+
+      <div class="demo-login-hint" id="authHint">
+        <strong>Supabase Auth</strong>
+        <span>Enter an email/password user from your Supabase project.</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="app-shell hidden" id="appShell">
     <aside class="sidebar">
       <div>
         <div class="brand">
@@ -37,6 +100,12 @@
           <p id="sidebarClockDate" class="sidebar-footer-date">Monday, 30 March 2026</p>
           <p class="muted">Sydney, Australia</p>
         </div>
+        <div class="sidebar-footer user-panel">
+          <p class="mini-label">Signed in</p>
+          <strong id="signedInName">Ava</strong>
+          <p id="signedInEmail" class="sidebar-footer-date">ava@unigroup.test</p>
+          <button type="button" class="secondary-btn logout-btn" id="logoutBtn">Log out</button>
+        </div>
       </div>
     </aside>
 
@@ -59,10 +128,10 @@
 
       <section id="dashboard" class="section active">
         <div class="stats-grid">
-          <div class="stat-card">
+          <button type="button" class="stat-card stat-card-link" id="statMembersBtn">
             <span>Total members</span>
             <strong id="statMembers">4</strong>
-          </div>
+          </button>
           <div class="stat-card">
             <span>Open tasks</span>
             <strong id="statTasks">9</strong>
@@ -81,7 +150,7 @@
           <div class="card">
             <div class="card-header">
               <h3>Group members</h3>
-              <span class="badge">Live sample</span>
+              <span class="badge">Current team</span>
             </div>
             <div id="memberCards" class="member-grid"></div>
           </div>
@@ -119,7 +188,10 @@
                   <h3 id="chatTitle">INFO2222 Team Alpha</h3>
                   <p id="chatGroupLabel" class="muted">All group messages</p>
                 </div>
-                <span class="badge" id="messageCountBadge">0 messages</span>
+                <div class="chat-topbar-actions">
+                  <button type="button" class="small-btn" id="openAddMemberBtn">+ Add member</button>
+                  <span class="badge" id="messageCountBadge">0 messages</span>
+                </div>
               </div>
               <div id="chatMessages" class="chat-messages"></div>
               <form id="chatForm" class="chat-input-row">
@@ -288,6 +360,22 @@
           </div>
         </div>
       </section>
+
+      <section id="members" class="section">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h3>Team members</h3>
+              <p id="teamManagementMeta" class="muted">Select a group to manage its team.</p>
+            </div>
+            <div class="chat-topbar-actions">
+              <button type="button" class="small-btn" id="openAddMemberFromTeam">+ Add member</button>
+              <span class="badge">Current team</span>
+            </div>
+          </div>
+          <div id="memberDirectory" class="member-directory"></div>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -298,10 +386,11 @@
         <button class="icon-btn" type="button" id="closeAddDeadlineModal" aria-label="Close">✕</button>
       </div>
       <form id="addDeadlineForm" class="stack-form">
-        <label class="stack-label">Due day (this week)
-          <select id="addDeadlineWeekday" required></select>
+        <label class="stack-label">Deadline date
+          <input id="addDeadlineDate" type="date" required />
         </label>
         <button class="primary-btn" type="submit">Save to heatmap</button>
+        <p id="addDeadlineFeedback" class="feedback-text login-feedback" role="alert"></p>
       </form>
     </div>
   </div>
@@ -315,11 +404,33 @@
       <form id="groupForm" class="stack-form">
         <input id="groupNameInput" type="text" placeholder="Group name" required />
         <input id="groupTopicInput" type="text" placeholder="First topic/channel (e.g. General)" required />
+        <div>
+          <p class="stack-label">Members</p>
+          <div id="groupMemberPicker" class="member-picker"></div>
+        </div>
         <button class="primary-btn" type="submit">Create group</button>
       </form>
     </div>
   </div>
 
+  <div class="modal hidden" id="addMemberModal">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3>Add member to group</h3>
+        <button class="icon-btn" id="closeAddMemberModal">✕</button>
+      </div>
+      <form id="addMemberForm" class="stack-form">
+        <label class="stack-label">Member email
+          <input id="addMemberEmail" type="email" autocomplete="email" placeholder="student@example.com" required />
+        </label>
+        <button class="primary-btn" type="submit">Add to group</button>
+        <p id="addMemberFeedback" class="feedback-text login-feedback" role="alert"></p>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
   <script src="script.js"></script>
 </body>
 </html>
