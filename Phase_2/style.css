@@ -658,6 +658,12 @@ button { cursor: pointer; }
 }
 .chat-input-wrap {
   position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.chat-input-wrap input {
+  display: block;
+  width: 100%;
 }
 .chat-input-row input, .stack-form input, .stack-form select, .setting-row select {
   border: 1px solid var(--line);
