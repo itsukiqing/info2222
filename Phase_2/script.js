@@ -137,6 +137,10 @@ let chatInitInProgress = false;
 let chatLoadError = '';
 let availableChatMembers = [];
 let chatLoadVersion = 0;
+let dailySummaryLoading = false;
+let dailySummaryError = '';
+const dailySummaryCache = {};
+let dailySummaryFailedKey = '';
 let teamMembers = [];
 let teamMembersLoading = false;
 let teamMembersError = '';
@@ -913,7 +917,12 @@ async function saveCurrentUserAvailability(day, slots) {
       updated_at: new Date().toISOString()
     }, { onConflict: 'group_id,user_id,day_name' });
 
-  if (fallbackError) throw error;
+  if (fallbackError) {
+    if (String(error.message || '').includes('column reference "user_id" is ambiguous')) {
+      throw new Error('The meeting availability function in Supabase needs the latest SQL update. Re-run supabase-chat-schema.sql, then try again.');
+    }
+    throw fallbackError;
+  }
 }
 
 async function saveCurrentUserDeadline(deadline) {
@@ -1378,27 +1387,213 @@ function getGroupMessages(group = getActiveGroup()) {
     }))
   );
 }
+
+function normalizeHandle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function getMentionHandlesForCurrentUser() {
+  const handles = new Set();
+  const activeMembers = getActiveTeamMembers();
+  const currentMember = activeMembers.find(member => String(member.id) === String(currentUser?.id));
+
+  if (currentUser?.username) handles.add(normalizeHandle(currentUser.username));
+  if (currentUser?.name) {
+    handles.add(normalizeHandle(currentUser.name));
+    currentUser.name.split(/\s+/).filter(Boolean).forEach(part => handles.add(normalizeHandle(part)));
+  }
+  if (currentMember?.name) {
+    handles.add(normalizeHandle(currentMember.name));
+    currentMember.name.split(/\s+/).filter(Boolean).forEach(part => handles.add(normalizeHandle(part)));
+  }
+  if (currentMember?.email) handles.add(normalizeHandle(currentMember.email.split('@')[0]));
+
+  return [...handles].filter(Boolean);
+}
+
+function getMentionTargets(messageText) {
+  return [...String(messageText || '').matchAll(/@([a-zA-Z0-9._-]+)/g)]
+    .map(match => normalizeHandle(match[1]))
+    .filter(Boolean);
+}
+
 function getMentionMessages() {
+  const handles = getMentionHandlesForCurrentUser();
+  if (!handles.length) return [];
+
   return appData.groups.flatMap(group =>
     getGroupMessages(group)
-      .filter(message => /@you\b/i.test(message.text))
+      .filter(message => getMentionTargets(message.text).some(target => handles.includes(target)))
       .map(message => ({ ...message, groupName: group.name }))
   );
 }
+
 function getTodayMessages() {
+  const today = new Date().toISOString().slice(0, 10);
   return appData.groups.flatMap(group =>
     getGroupMessages(group)
-      .filter(message => message.date === '2026-04-01')
+      .filter(message => message.date === today)
       .map(message => ({ ...message, groupName: group.name }))
   );
 }
+
+function getDailySummarySource(group = getActiveGroup()) {
+  if (!group) {
+    return {
+      messages: [],
+      badgeLabel: 'No messages',
+      scopeLabel: 'No group selected'
+    };
+  }
+
+  const sortedMessages = getGroupMessages(group)
+    .slice()
+    .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  const today = new Date().toISOString().slice(0, 10);
+  const todayMessages = sortedMessages.filter(message => message.date === today);
+
+  if (todayMessages.length) {
+    return {
+      messages: todayMessages,
+      badgeLabel: `${todayMessages.length} messages today`,
+      scopeLabel: 'Today'
+    };
+  }
+
+  const recentMessages = sortedMessages.slice(-12);
+  return {
+    messages: recentMessages,
+    badgeLabel: `${recentMessages.length} recent messages`,
+    scopeLabel: 'Recent activity'
+  };
+}
+
+function getDailySummaryCacheKey(group = getActiveGroup()) {
+  if (!group) return '';
+  const { messages } = getDailySummarySource(group);
+  const signature = messages.map(message => [
+    message.channelId || '',
+    message.sender || '',
+    message.text || '',
+    message.createdAt || '',
+    message.date || '',
+    message.time || ''
+  ].join('|')).join('||');
+  return `${group.id}:${messages.length}:${signature}`;
+}
+
+function formatMessagePreview(text, maxLength = 90) {
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength - 1)}…`;
+}
+
 function getActiveGroupSummary(group = getActiveGroup()) {
   if (!group) return 'Create a group chat to start building a daily summary.';
-  if (group.id === 2) {
-    return 'COMP Project Beta spent today tightening the prototype for presentation: testing feedback was reviewed, slide timing was shortened, and the reminder mock was requested for the final deck.';
-  }
-  return 'INFO2222 Team Alpha focused on demo polish today: meeting availability is being confirmed, the chat layout is under review, and the reminder/summary flow is being prepared for the next prototype pass.';
+
+  const { messages, scopeLabel } = getDailySummarySource(group);
+  if (!messages.length) return `${group.name} has no messages yet.`;
+
+  const latestDate = messages[messages.length - 1]?.date;
+  const recentMessages = messages;
+  const senders = [...new Set(recentMessages.map(message => message.sender).filter(Boolean))];
+  const channels = [...new Set(recentMessages.map(message => message.channelName).filter(Boolean))];
+  const mentions = recentMessages.filter(message => getMentionTargets(message.text).length > 0).length;
+  const latestMessage = recentMessages[recentMessages.length - 1];
+
+  const sentences = [
+    `${group.name} had ${recentMessages.length} ${scopeLabel.toLowerCase()} message${recentMessages.length === 1 ? '' : 's'}${latestDate ? ` on ${formatShortDate(latestDate)}` : ''}.`,
+    senders.length ? `${senders.join(', ')} contributed to the discussion.` : '',
+    channels.length ? `Conversation happened in ${channels.map(channel => `# ${channel}`).join(', ')}.` : '',
+    mentions ? `${mentions} message${mentions === 1 ? '' : 's'} included an @mention.` : '',
+    latestMessage ? `Latest update: ${latestMessage.sender} said "${formatMessagePreview(latestMessage.text, 80)}"` : ''
+  ].filter(Boolean);
+
+  return sentences.join(' ');
 }
+
+function extractApiSummaryText(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  if (typeof payload.summary === 'string') return payload.summary.trim();
+  return '';
+}
+
+async function fetchDailySummaryForGroup(group = getActiveGroup()) {
+  if (!group) return '';
+
+  const cacheKey = getDailySummaryCacheKey(group);
+  if (cacheKey && dailySummaryCache[cacheKey]) {
+    dailySummaryError = '';
+    dailySummaryFailedKey = '';
+    return dailySummaryCache[cacheKey];
+  }
+
+  const { messages } = getDailySummarySource(group);
+  if (!messages.length) return `${group.name} has no messages yet.`;
+
+  dailySummaryLoading = true;
+  dailySummaryError = '';
+  dailySummaryFailedKey = '';
+  renderChatUtilityPanel();
+
+  try {
+    const response = await fetch('/api/daily-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        groupName: group.name,
+        scope: getDailySummarySource(group).scopeLabel,
+        messages: messages.map(message => ({
+          sender: message.sender,
+          text: message.text,
+          channelName: message.channelName,
+          time: message.time,
+          date: message.date
+        }))
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Daily summary is unavailable right now.');
+    }
+
+    const summary = extractApiSummaryText(payload);
+    if (!summary) {
+      throw new Error('The summary service returned an empty result.');
+    }
+
+    if (cacheKey) dailySummaryCache[cacheKey] = summary;
+    return summary;
+  } catch (error) {
+    dailySummaryError = error.message || 'Daily summary is unavailable right now.';
+    dailySummaryFailedKey = cacheKey;
+    return '';
+  } finally {
+    dailySummaryLoading = false;
+    renderChatUtilityPanel();
+  }
+}
+
+function ensureDailySummary() {
+  if (activeChatUtility !== 'summary') return;
+  const activeGroup = getActiveGroup();
+  if (!activeGroup || dailySummaryLoading) return;
+
+  const cacheKey = getDailySummaryCacheKey(activeGroup);
+  if (cacheKey && dailySummaryCache[cacheKey]) {
+    dailySummaryError = '';
+    return;
+  }
+  if (cacheKey && cacheKey === dailySummaryFailedKey) return;
+
+  fetchDailySummaryForGroup(activeGroup);
+}
+
 function syncChatModeVisibility() {
   $('#chatMainView').classList.toggle('hidden', activeChatUtility !== 'chat');
 }
@@ -1498,18 +1693,28 @@ function renderChatUtilityPanel() {
   }
 
   if (activeChatUtility === 'summary') {
-    const todayMessages = getTodayMessages().filter(message => message.groupName === activeGroup.name);
+    const { badgeLabel } = getDailySummarySource(activeGroup);
+    const cacheKey = getDailySummaryCacheKey(activeGroup);
+    const cachedSummary = cacheKey ? dailySummaryCache[cacheKey] : '';
+    const summaryText = cachedSummary || getActiveGroupSummary(activeGroup);
+    const helperText = dailySummaryLoading
+      ? 'Writing the summary with ChatGPT…'
+      : dailySummaryError
+        ? `${dailySummaryError} Showing the local summary instead.`
+        : 'Generated from the latest group chat activity.';
     panel.innerHTML = `
       <div class="chat-utility-card">
         <div class="chat-utility-header">
           <strong>Daily Summary</strong>
-          <span class="badge">${todayMessages.length} messages today</span>
+          <span class="badge">${escapeHtml(badgeLabel)}</span>
         </div>
+        <p class="chat-utility-meta">${escapeHtml(helperText)}</p>
         <p class="chat-utility-summary">
-          ${getActiveGroupSummary()}
+          ${escapeHtml(summaryText)}
         </p>
       </div>
     `;
+    ensureDailySummary();
     return;
   }
 
@@ -1521,12 +1726,12 @@ function renderChatUtilityPanel() {
         <span class="badge">${reminders.length} mentions</span>
       </div>
       <div class="chat-utility-list">
-        ${reminders.map(message => `
+        ${reminders.length ? reminders.map(message => `
           <div class="chat-utility-item">
-            <div class="chat-utility-meta">${message.groupName} · # ${message.channelName} · ${message.time}</div>
-            <div><strong>${message.sender}:</strong> ${message.text}</div>
+            <div class="chat-utility-meta">${escapeHtml(message.groupName)} · # ${escapeHtml(message.channelName)} · ${escapeHtml(message.time)}</div>
+            <div><strong>${escapeHtml(message.sender)}:</strong> ${escapeHtml(message.text)}</div>
           </div>
-        `).join('')}
+        `).join('') : '<div class="chat-utility-item">No reminders yet. Messages that mention you with @name will appear here.</div>'}
       </div>
     </div>
   `;

@@ -604,10 +604,12 @@ $$;
 
 grant execute on function public.remove_chat_group_member(uuid, uuid) to authenticated;
 
-create or replace function public.upsert_my_chat_group_availability(
-  target_group_id uuid,
-  target_day_name text,
-  target_slots text[]
+drop function if exists public.upsert_my_chat_group_availability(uuid, text, text[]);
+
+create function public.upsert_my_chat_group_availability(
+  p_group_id uuid,
+  p_day_name text,
+  p_slots text[]
 )
 returns table(
   user_id uuid,
@@ -620,6 +622,7 @@ set search_path = public
 as $$
 declare
   acting_user_id uuid;
+  saved_row record;
 begin
   acting_user_id := auth.uid();
 
@@ -627,7 +630,7 @@ begin
     raise exception 'You must be signed in to update availability';
   end if;
 
-  if not public.is_chat_group_member(target_group_id, acting_user_id) then
+  if not public.is_chat_group_member(p_group_id, acting_user_id) then
     raise exception 'You are not a member of this team';
   end if;
 
@@ -639,25 +642,36 @@ begin
     updated_at
   )
   values (
-    target_group_id,
+    p_group_id,
     acting_user_id,
-    target_day_name,
-    coalesce(target_slots, '{}'),
+    p_day_name,
+    coalesce(p_slots, '{}'),
     now()
   )
-  on conflict (group_id, user_id, day_name) do update
+  on conflict on constraint chat_group_member_availability_pkey do update
   set slots = excluded.slots,
       updated_at = excluded.updated_at;
 
-  return query
   select
     availability.user_id,
     availability.day_name,
     availability.slots
-  from public.chat_group_member_availability availability
-  where availability.group_id = target_group_id
+  into saved_row
+  from public.chat_group_member_availability as availability
+  where availability.group_id = p_group_id
     and availability.user_id = acting_user_id
-    and availability.day_name = target_day_name;
+    and availability.day_name = p_day_name
+  limit 1;
+
+  if saved_row is null then
+    return;
+  end if;
+
+  user_id := saved_row.user_id;
+  day_name := saved_row.day_name;
+  slots := saved_row.slots;
+
+  return next;
 end;
 $$;
 
