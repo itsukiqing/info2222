@@ -195,7 +195,10 @@
               </div>
               <div id="chatMessages" class="chat-messages"></div>
               <form id="chatForm" class="chat-input-row">
-                <input id="chatInput" type="text" placeholder="Type a message..." />
+                <div class="chat-input-wrap">
+                  <input id="chatInput" type="text" placeholder="Type a message..." autocomplete="off" />
+                  <div id="mentionSuggestions" class="mention-suggestions hidden" role="listbox" aria-label="Mention suggestions"></div>
+                </div>
                 <button class="primary-btn" type="submit">Send</button>
               </form>
             </div>

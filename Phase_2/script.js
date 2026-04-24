@@ -141,6 +141,9 @@ let dailySummaryLoading = false;
 let dailySummaryError = '';
 const dailySummaryCache = {};
 let dailySummaryFailedKey = '';
+let mentionSuggestions = [];
+let mentionSelectionIndex = 0;
+let activeMentionQuery = null;
 let teamMembers = [];
 let teamMembersLoading = false;
 let teamMembersError = '';
@@ -682,6 +685,33 @@ function normalizeTeamMember(member) {
 function getActiveTeamMembers() {
   if (supabaseClient) return teamMembers;
   return appData.members;
+}
+
+function getMentionHandleForMember(member) {
+  if (!member) return '';
+  if (member.username) return member.username;
+  if (member.email) return member.email.split('@')[0];
+  return String(member.name || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '');
+}
+
+function getMentionableMembers() {
+  const seenHandles = new Set();
+  return getActiveTeamMembers()
+    .map(member => {
+      const handle = getMentionHandleForMember(member);
+      if (!handle) return null;
+      const normalizedHandle = handle.toLowerCase();
+      if (seenHandles.has(normalizedHandle)) return null;
+      seenHandles.add(normalizedHandle);
+      return {
+        ...member,
+        mentionHandle: handle
+      };
+    })
+    .filter(Boolean);
 }
 
 function syncMemberDependentInputs() {
@@ -1419,6 +1449,92 @@ function getMentionTargets(messageText) {
     .filter(Boolean);
 }
 
+function getMentionQueryState(value, caretPosition) {
+  const prefix = String(value || '').slice(0, caretPosition);
+  const match = prefix.match(/(^|\s)@([a-zA-Z0-9._-]*)$/);
+  if (!match) return null;
+  const query = match[2] || '';
+  const start = prefix.length - query.length - 1;
+  return {
+    query,
+    start,
+    end: caretPosition
+  };
+}
+
+function closeMentionSuggestions() {
+  mentionSuggestions = [];
+  mentionSelectionIndex = 0;
+  activeMentionQuery = null;
+  $('#mentionSuggestions').classList.add('hidden');
+  $('#mentionSuggestions').innerHTML = '';
+}
+
+function renderMentionSuggestions() {
+  const container = $('#mentionSuggestions');
+  if (!mentionSuggestions.length || !activeMentionQuery) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  container.classList.remove('hidden');
+  container.innerHTML = mentionSuggestions.map((member, index) => `
+    <button
+      type="button"
+      class="mention-suggestion ${index === mentionSelectionIndex ? 'active' : ''}"
+      data-mention-index="${index}"
+      role="option"
+      aria-selected="${index === mentionSelectionIndex ? 'true' : 'false'}"
+    >
+      <span class="mention-suggestion-name">${escapeHtml(member.name)}</span>
+      <span class="mention-suggestion-handle">@${escapeHtml(member.mentionHandle)}</span>
+    </button>
+  `).join('');
+}
+
+function updateMentionSuggestions() {
+  const input = $('#chatInput');
+  const queryState = getMentionQueryState(input.value, input.selectionStart || 0);
+  if (!queryState) {
+    closeMentionSuggestions();
+    return;
+  }
+
+  const normalizedQuery = normalizeHandle(queryState.query);
+  const matches = getMentionableMembers().filter(member => {
+    const handle = normalizeHandle(member.mentionHandle);
+    const name = normalizeHandle(member.name);
+    return !normalizedQuery || handle.startsWith(normalizedQuery) || name.includes(normalizedQuery);
+  });
+
+  if (!matches.length) {
+    closeMentionSuggestions();
+    return;
+  }
+
+  activeMentionQuery = queryState;
+  mentionSuggestions = matches.slice(0, 6);
+  mentionSelectionIndex = Math.min(mentionSelectionIndex, mentionSuggestions.length - 1);
+  renderMentionSuggestions();
+}
+
+function applyMentionSuggestion(member) {
+  if (!member) return;
+  const input = $('#chatInput');
+  const queryState = activeMentionQuery || getMentionQueryState(input.value, input.selectionStart || 0);
+  if (!queryState) return;
+
+  const before = input.value.slice(0, queryState.start);
+  const after = input.value.slice(queryState.end);
+  const mentionText = `@${member.mentionHandle} `;
+  input.value = `${before}${mentionText}${after}`;
+  const caretPosition = before.length + mentionText.length;
+  input.focus();
+  input.setSelectionRange(caretPosition, caretPosition);
+  closeMentionSuggestions();
+}
+
 function getMentionMessages() {
   const handles = getMentionHandlesForCurrentUser();
   if (!handles.length) return [];
@@ -1744,9 +1860,61 @@ function syncChatUtilityButtons() {
 }
 
 function bindChat() {
+  const input = $('#chatInput');
+
+  input.addEventListener('input', () => {
+    mentionSelectionIndex = 0;
+    updateMentionSuggestions();
+  });
+
+  input.addEventListener('click', () => {
+    updateMentionSuggestions();
+  });
+
+  input.addEventListener('keydown', e => {
+    if (!mentionSuggestions.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionSelectionIndex = (mentionSelectionIndex + 1) % mentionSuggestions.length;
+      renderMentionSuggestions();
+      return;
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionSelectionIndex = (mentionSelectionIndex - 1 + mentionSuggestions.length) % mentionSuggestions.length;
+      renderMentionSuggestions();
+      return;
+    }
+
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      applyMentionSuggestion(mentionSuggestions[mentionSelectionIndex]);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentionSuggestions();
+    }
+  });
+
+  $('#mentionSuggestions').addEventListener('mousedown', e => {
+    const button = e.target.closest('[data-mention-index]');
+    if (!button) return;
+    e.preventDefault();
+    applyMentionSuggestion(mentionSuggestions[Number(button.dataset.mentionIndex)]);
+  });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.chat-input-wrap')) {
+      closeMentionSuggestions();
+    }
+  });
+
   $('#chatForm').addEventListener('submit', async e => {
     e.preventDefault();
-    const input = $('#chatInput');
     const text = input.value.trim();
     if (!text) return;
 
@@ -1788,6 +1956,7 @@ function bindChat() {
         channelName: activeChannel.name
       });
       input.value = '';
+      closeMentionSuggestions();
       chatLoadError = '';
       renderChat();
       loadChatFromDatabase();
@@ -1801,6 +1970,7 @@ function bindChat() {
       date: '2026-04-01'
     });
     input.value = '';
+    closeMentionSuggestions();
     renderChat();
   });
 
