@@ -918,3 +918,47 @@ end;
 $$;
 
 grant execute on function public.create_chat_group_call(uuid, text, date, time, text[]) to authenticated;
+
+create table if not exists public.chat_group_tasks (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  title text not null,
+  assignee_name text not null default 'N/A',
+  assignee_user_id uuid references auth.users(id) on delete set null,
+  priority_rank integer not null default 3 check (priority_rank between 1 and 4),
+  duration_days integer not null default 1 check (duration_days >= 1),
+  status text not null default 'Not Started',
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists chat_group_tasks_group_id_idx
+on public.chat_group_tasks(group_id, priority_rank, created_at);
+
+alter table public.chat_group_tasks enable row level security;
+
+drop policy if exists "Members can read chat group tasks" on public.chat_group_tasks;
+drop policy if exists "Members can create chat group tasks" on public.chat_group_tasks;
+drop policy if exists "Members can update chat group tasks" on public.chat_group_tasks;
+
+create policy "Members can read chat group tasks"
+on public.chat_group_tasks
+for select
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()));
+
+create policy "Members can create chat group tasks"
+on public.chat_group_tasks
+for insert
+to authenticated
+with check (
+  created_by = auth.uid()
+  and public.is_chat_group_member(group_id, auth.uid())
+);
+
+create policy "Members can update chat group tasks"
+on public.chat_group_tasks
+for update
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()))
+with check (public.is_chat_group_member(group_id, auth.uid()));

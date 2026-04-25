@@ -100,11 +100,11 @@ const appData = {
     }
   ],
   tasks: [
-    { id: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
-    { id: 2, title: 'Testing', assignee: 'Ben', priorityRank: 2, durationDays: 3, status: 'In Progress' },
-    { id: 3, title: 'Building Framework', assignee: 'Chloe', priorityRank: 3, durationDays: 2, status: 'Not Started' },
-    { id: 4, title: 'Marketing', assignee: 'N/A', priorityRank: 4, durationDays: 2, status: 'Not Assigned' },
-    { id: 5, title: 'Task panel polish', assignee: 'Ben', priorityRank: 4, durationDays: 1, status: 'In Progress' }
+    { id: 1, groupId: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
+    { id: 2, groupId: 1, title: 'Testing', assignee: 'Ben', priorityRank: 2, durationDays: 3, status: 'In Progress' },
+    { id: 3, groupId: 1, title: 'Building Framework', assignee: 'Ava', priorityRank: 3, durationDays: 2, status: 'Not Started' },
+    { id: 4, groupId: 2, title: 'Marketing', assignee: 'N/A', priorityRank: 4, durationDays: 2, status: 'Not Assigned' },
+    { id: 5, groupId: 2, title: 'Task panel polish', assignee: 'Ben', priorityRank: 4, durationDays: 1, status: 'In Progress' }
   ],
   availability: {
     Wednesday: {
@@ -179,6 +179,12 @@ let callsLoading = false;
 let callsError = '';
 let loadedCallsGroupId = null;
 let selectedCallId = null;
+let groupTasks = [];
+let tasksLoading = false;
+let tasksError = '';
+let loadedTasksGroupId = null;
+let catchupLoading = false;
+let catchupError = '';
 
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
 const MEMBER_STAGES = ['Not set', 'To Do', 'In Progress', 'Review', 'Done'];
@@ -731,6 +737,21 @@ function normalizeCallRecord(call) {
   };
 }
 
+function normalizeTaskRecord(task) {
+  return {
+    id: task.task_id || task.id,
+    groupId: task.group_id || task.groupId || null,
+    title: task.title || 'Untitled task',
+    assignee: task.assignee_name || task.assignee || 'N/A',
+    assigneeUserId: task.assignee_user_id || task.assigneeUserId || null,
+    priorityRank: Number(task.priority_rank || task.priorityRank || 3),
+    durationDays: Math.max(1, Number(task.duration_days || task.durationDays || 1)),
+    status: task.status || 'Not Started',
+    createdBy: task.created_by || task.createdBy || null,
+    createdAt: task.created_at || task.createdAt || ''
+  };
+}
+
 function getCallsForActiveGroup() {
   const activeGroup = getActiveGroup();
   if (!activeGroup) return [];
@@ -738,6 +759,20 @@ function getCallsForActiveGroup() {
   return appData.scheduledCalls
     .filter(call => String(call.groupId || activeGroup.id) === String(activeGroup.id))
     .map(normalizeCallRecord);
+}
+
+function getTasksForGroup(group = getActiveGroup()) {
+  if (!group) return [];
+  if (supabaseClient) {
+    return loadedTasksGroupId === group.id ? groupTasks : [];
+  }
+  return appData.tasks
+    .filter(task => String(task.groupId || group.id) === String(group.id))
+    .map(normalizeTaskRecord);
+}
+
+function getTasksForActiveGroup() {
+  return getTasksForGroup(getActiveGroup());
 }
 
 function buildLocalCallQuestions(topic, participantNames = []) {
@@ -798,11 +833,13 @@ async function loadGroupCallsForActiveGroup(force = false) {
     callsError = '';
     loadedCallsGroupId = activeGroup?.id || null;
     renderCalls();
+    renderCatchupHighlights();
     return;
   }
 
   if (!force && loadedCallsGroupId === activeGroup.id && (groupCalls.length || callsError)) {
     renderCalls();
+    renderCatchupHighlights();
     return;
   }
 
@@ -820,6 +857,7 @@ async function loadGroupCallsForActiveGroup(force = false) {
     callsError = error.message;
     loadedCallsGroupId = null;
     renderCalls();
+    renderCatchupHighlights();
     return;
   }
 
@@ -828,6 +866,7 @@ async function loadGroupCallsForActiveGroup(force = false) {
   loadedCallsGroupId = activeGroup.id;
   callsError = '';
   renderCalls();
+  renderCatchupHighlights();
 }
 
 function getMentionHandleForMember(member) {
@@ -1156,9 +1195,10 @@ async function saveCurrentUserDeadline(deadline) {
 function renderDashboard() {
   const members = getActiveTeamMembers();
   const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
 
   $('#statMembers').textContent = members.length;
-  $('#statTasks').textContent = appData.tasks.length;
+  $('#statTasks').textContent = tasks.length;
   $('#statMeetingTime').textContent = computeSuggestedMeeting().label;
 
   if (supabaseClient && !activeGroup) {
@@ -1190,13 +1230,13 @@ function renderDashboard() {
     `).join('');
   }
 
-  $('#taskSnapshot').innerHTML = appData.tasks.slice(0, 5).map(task => `
+  $('#taskSnapshot').innerHTML = tasks.slice(0, 5).map(task => `
     <div class="snapshot-item">
       <strong>${task.title}</strong>
       <p class="muted">${task.assignee} · ${task.status} · P${task.priorityRank}</p>
       <small>Duration: ${task.durationDays} days</small>
     </div>
-  `).join('');
+  `).join('') || '<p class="muted">No tasks yet for this team.</p>';
 }
 
 function renderMembersDirectory() {
@@ -1931,10 +1971,12 @@ function renderChat() {
       activeGroupId = btn.dataset.groupId;
       activeChannelId = getActiveGroup()?.channels[0]?.id || null;
       loadedCallsGroupId = null;
+      loadedTasksGroupId = null;
       selectedCallId = null;
       renderChat();
       loadTeamMembersForActiveGroup();
       loadGroupCallsForActiveGroup();
+      loadTasksForActiveGroup();
     });
   });
 }
@@ -2520,17 +2562,128 @@ function renderCalls() {
   });
 }
 
+async function loadTasksForActiveGroup(force = false) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    groupTasks = activeGroup
+      ? appData.tasks
+        .filter(task => String(task.groupId || activeGroup.id) === String(activeGroup.id))
+        .map(normalizeTaskRecord)
+      : [];
+    tasksLoading = false;
+    tasksError = '';
+    loadedTasksGroupId = activeGroup?.id || null;
+    renderTasks();
+    renderDashboard();
+    renderCatchupHighlights();
+    return;
+  }
+
+  if (!force && loadedTasksGroupId === activeGroup.id && (groupTasks.length || tasksError)) {
+    renderTasks();
+    renderDashboard();
+    renderCatchupHighlights();
+    return;
+  }
+
+  tasksLoading = true;
+  tasksError = '';
+  renderTasks();
+
+  const { data, error } = await supabaseClient
+    .from('chat_group_tasks')
+    .select('id, group_id, title, assignee_name, assignee_user_id, priority_rank, duration_days, status, created_by, created_at')
+    .eq('group_id', activeGroup.id)
+    .order('priority_rank', { ascending: true })
+    .order('created_at', { ascending: false });
+
+  tasksLoading = false;
+
+  if (error) {
+    groupTasks = [];
+    tasksError = error.message || 'Could not load tasks.';
+    loadedTasksGroupId = null;
+    renderTasks();
+    renderDashboard();
+    renderCatchupHighlights();
+    return;
+  }
+
+  groupTasks = (data || []).map(normalizeTaskRecord);
+  loadedTasksGroupId = activeGroup.id;
+  tasksError = '';
+  renderTasks();
+  renderDashboard();
+  renderCatchupHighlights();
+}
+
+async function saveTaskStatus(taskId, status) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    const localTask = appData.tasks.find(task => String(task.id) === String(taskId));
+    if (localTask) localTask.status = status;
+    return;
+  }
+
+  const { error } = await supabaseClient
+    .from('chat_group_tasks')
+    .update({ status })
+    .eq('id', taskId)
+    .eq('group_id', activeGroup.id);
+
+  if (error) throw error;
+}
+
 function bindTasks() {
   syncMemberDependentInputs();
-  $('#taskForm').addEventListener('submit', e => {
+  $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const activeGroup = getActiveGroup();
     const assignee = $('#taskAssignee').value;
+    const title = $('#taskTitle').value.trim();
+    const priorityRank = Number($('#taskPriority').value);
+    const durationDays = Math.max(1, Number($('#taskDuration').value) || 1);
+    const assigneeMember = getActiveTeamMembers().find(member => member.name === assignee);
+
+    if (!activeGroup) {
+      return;
+    }
+
+    if (supabaseClient && currentUser) {
+      const { error } = await supabaseClient
+        .from('chat_group_tasks')
+        .insert({
+          group_id: activeGroup.id,
+          title,
+          assignee_name: assignee,
+          assignee_user_id: assignee === 'N/A' ? null : assigneeMember?.id || null,
+          priority_rank: priorityRank,
+          duration_days: durationDays,
+          status: assignee === 'N/A' ? 'Not Assigned' : 'Not Started',
+          created_by: currentUser.id
+        });
+
+      if (error) {
+        tasksError = error.message;
+        renderTasks();
+        return;
+      }
+
+      e.target.reset();
+      $('#taskPriority').value = '3';
+      $('#taskDuration').value = '3';
+      tasksError = '';
+      await loadTasksForActiveGroup(true);
+      return;
+    }
+
     appData.tasks.push({
       id: Date.now(),
-      title: $('#taskTitle').value.trim(),
+      groupId: activeGroup.id,
+      title,
       assignee,
-      priorityRank: Number($('#taskPriority').value),
-      durationDays: Math.max(1, Number($('#taskDuration').value) || 1),
+      priorityRank,
+      durationDays,
       status: assignee === 'N/A' ? 'Not Assigned' : 'Not Started'
     });
     e.target.reset();
@@ -2538,6 +2691,7 @@ function bindTasks() {
     $('#taskDuration').value = '3';
     renderTasks();
     renderDashboard();
+    renderCatchupHighlights();
   });
 }
 
@@ -2609,12 +2763,34 @@ function bindChecklistControls() {
 
 function renderTasks() {
   const container = $('#checklistItems');
-  if (!appData.tasks.length) {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+
+  if (supabaseClient && !activeGroup) {
+    container.innerHTML = '<p class="muted">Select a team chat first to manage that team\'s tasks.</p>';
+    return;
+  }
+
+  if (supabaseClient && loadedTasksGroupId !== activeGroup?.id && !tasksLoading) {
+    loadTasksForActiveGroup();
+  }
+
+  if (tasksLoading) {
+    container.innerHTML = '<p class="muted">Loading tasks...</p>';
+    return;
+  }
+
+  if (tasksError) {
+    container.innerHTML = `<p class="muted">${escapeHtml(tasksError)}</p>`;
+    return;
+  }
+
+  if (!tasks.length) {
     container.innerHTML = '<p class="muted">No tasks yet. Add one on the left.</p>';
     return;
   }
 
-  const filtered = appData.tasks.filter(t => checklistStatusFilter === null || t.status === checklistStatusFilter);
+  const filtered = tasks.filter(t => checklistStatusFilter === null || t.status === checklistStatusFilter);
   const sorted = [...filtered].sort((a, b) => {
     let cmp = 0;
     if (checklistSortBy === 'priority') {
@@ -2702,46 +2878,166 @@ function renderTasks() {
   `;
 
   $all('#checklistItems .checklist-status-select').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const task = appData.tasks.find(t => t.id === Number(sel.dataset.taskId));
+    sel.addEventListener('change', async () => {
+      const task = tasks.find(t => String(t.id) === String(sel.dataset.taskId));
       if (!task) return;
-      task.status = sel.value;
+
+      if (supabaseClient) {
+        try {
+          await saveTaskStatus(task.id, sel.value);
+          task.status = sel.value;
+          groupTasks = groupTasks.map(item => String(item.id) === String(task.id) ? { ...item, status: sel.value } : item);
+        } catch (error) {
+          tasksError = error.message || 'Could not update the task status.';
+        }
+      } else {
+        const localTask = appData.tasks.find(t => String(t.id) === String(task.id));
+        if (localTask) localTask.status = sel.value;
+      }
       renderTasks();
       renderDashboard();
+      renderCatchupHighlights();
     });
   });
 }
 
 function bindCatchup() {
   syncMemberDependentInputs();
-  $('#generateCatchup').addEventListener('click', renderCatchupSummary);
+  $('#generateCatchup').addEventListener('click', async () => {
+    await renderCatchupSummary();
+  });
 }
 
-function renderCatchupSummary() {
+function getRecentMessagesForCatchup(group = getActiveGroup(), limit = 12) {
+  return getGroupMessages(group)
+    .slice()
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .slice(0, limit);
+}
+
+function buildLocalCatchupSummary(memberName) {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const memberTasks = tasks.filter(task => task.assignee === memberName).slice(0, 3);
+  const recentMessages = getRecentMessagesForCatchup(activeGroup, 5);
+  const nextCall = calls[0];
+  const recentSenders = [...new Set(recentMessages.map(message => message.sender).filter(Boolean))];
+
+  return [
+    `${memberName} is currently catching up with ${activeGroup?.name || 'the team'}.`,
+    memberTasks.length
+      ? `Their active tasks include ${memberTasks.map(task => `${task.title} (${task.status})`).join(', ')}.`
+      : 'No tasks are currently assigned to them in this team.',
+    recentSenders.length
+      ? `Recent chat activity involved ${recentSenders.join(', ')}.`
+      : 'There has not been any recent chat activity yet.',
+    nextCall
+      ? `The next scheduled call is ${nextCall.title} on ${formatShortDate(nextCall.date)} at ${formatTime(nextCall.time)}.`
+      : 'There is no scheduled team call yet.'
+  ].join(' ');
+}
+
+async function renderCatchupSummary() {
   const member = $('#catchupMember').value;
   if (!member) {
     $('#catchupSummary').innerHTML = '<div class="summary-card"><p>Select a team member to generate a summary.</p></div>';
     return;
   }
-  const taskItems = appData.tasks.filter(t => t.assignee === member || t.status !== 'Done').slice(0, 3);
-  const meeting = computeSuggestedMeeting();
+
+  const activeGroup = getActiveGroup();
+  const memberRecord = getActiveTeamMembers().find(item => item.name === member);
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const messages = getRecentMessagesForCatchup(activeGroup, 12);
+
+  catchupLoading = true;
+  catchupError = '';
   $('#catchupSummary').innerHTML = `
     <div class="summary-card">
-      <h4>Catch-up for ${member}</h4>
-      <p>Recent discussion focused on finalising the prototype layout, confirming the heatmap feature, and preparing a tutor demo.</p>
-      <p><strong>Important task updates:</strong> ${taskItems.map(t => `${t.title} (${t.status})`).join(', ')}.</p>
-      <p><strong>Upcoming meeting:</strong> ${meeting.labelFull} is currently the best suggested slot.</p>
-      <p><strong>Deadline watch:</strong> Multiple members have overlapping report and coding deadlines this week.</p>
+      <h4>Catch-up for ${escapeHtml(member)}</h4>
+      <p>Writing the catch-up with ChatGPT...</p>
     </div>
   `;
+
+  try {
+    const response = await fetch('/api/catchup-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        memberName: member,
+        memberEmail: memberRecord?.email || '',
+        groupName: activeGroup?.name || '',
+        tasks: tasks.map(task => ({
+          title: task.title,
+          assignee: task.assignee,
+          priorityRank: task.priorityRank,
+          durationDays: task.durationDays,
+          status: task.status
+        })),
+        calls: calls.map(call => ({
+          title: call.title,
+          date: call.date,
+          time: call.time,
+          participantNames: call.participantNames,
+          generatedQuestions: call.generatedQuestions
+        })),
+        messages: messages.map(message => ({
+          sender: message.sender,
+          text: message.text,
+          channelName: message.channelName,
+          date: message.date,
+          time: message.time
+        }))
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Could not generate the catch-up summary.');
+    }
+
+    const summary = String(payload?.summary || '').trim();
+    if (!summary) {
+      throw new Error('The catch-up service returned an empty summary.');
+    }
+
+    $('#catchupSummary').innerHTML = `
+      <div class="summary-card">
+        <h4>Catch-up for ${escapeHtml(member)}</h4>
+        <p>${escapeHtml(summary)}</p>
+      </div>
+    `;
+  } catch (error) {
+    catchupError = error.message || 'Could not generate the catch-up summary.';
+    $('#catchupSummary').innerHTML = `
+      <div class="summary-card">
+        <h4>Catch-up for ${escapeHtml(member)}</h4>
+        <p>${escapeHtml(catchupError)} Showing the local summary instead.</p>
+        <p>${escapeHtml(buildLocalCatchupSummary(member))}</p>
+      </div>
+    `;
+  } finally {
+    catchupLoading = false;
+  }
 }
 
 function renderCatchupHighlights() {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const messages = getRecentMessagesForCatchup(activeGroup, 4);
+  const highlightedTask = tasks.find(task => task.status === 'In Progress') || tasks[0];
+  const highlightedCall = calls[0];
+  const latestMessage = messages[0];
+
   $('#recentHighlights').innerHTML = `
-    <div class="insight-item"><strong>Chat summary:</strong> Team agreed the heatmap and meeting decider should be the main demo focus.</div>
-    <div class="insight-item"><strong>Task movement:</strong> “Prepare tutor demo script” moved to Review.</div>
-    <div class="insight-item"><strong>Meeting note:</strong> Wednesday 4–5pm remains the strongest common time slot.</div>
-    <div class="insight-item"><strong>Reminder logic:</strong> End-of-day discussion summary and deadline reminders are enabled.</div>
+    <div class="insight-item"><strong>Chat summary:</strong> ${latestMessage ? `${escapeHtml(latestMessage.sender)} recently said "${escapeHtml(formatMessagePreview(latestMessage.text, 90))}" in # ${escapeHtml(latestMessage.channelName)}.` : 'No recent team chat yet.'}</div>
+    <div class="insight-item"><strong>Task movement:</strong> ${highlightedTask ? `${escapeHtml(highlightedTask.title)} is ${escapeHtml(highlightedTask.status.toLowerCase())} with priority ${highlightedTask.priorityRank}.` : 'No tasks have been added for this team yet.'}</div>
+    <div class="insight-item"><strong>Meeting note:</strong> ${highlightedCall ? `${escapeHtml(highlightedCall.title)} is scheduled for ${formatShortDate(highlightedCall.date)} at ${formatTime(highlightedCall.time)}.` : 'No team calls have been scheduled yet.'}</div>
+    <div class="insight-item"><strong>Reminder logic:</strong> ${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length} message${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length === 1 ? '' : 's'} currently mention someone in this group.</div>
   `;
 }
 
