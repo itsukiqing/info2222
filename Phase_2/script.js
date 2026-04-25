@@ -72,8 +72,32 @@ const appData = {
     { name: 'Daniel', dueWeekday: 6 }
   ],
   scheduledCalls: [
-    { id: 1, title: 'Weekly stand-up', date: '2026-04-03', time: '16:00' },
-    { id: 2, title: 'Prototype review', date: '2026-04-06', time: '18:00' }
+    {
+      id: 1,
+      groupId: 1,
+      title: 'Weekly stand-up',
+      date: '2026-04-03',
+      time: '16:00',
+      participantNames: ['Ava', 'Ben'],
+      generatedQuestions: [
+        'What changed since the last check-in?',
+        'What is blocking progress right now?',
+        'What needs to be finished before the next demo?'
+      ]
+    },
+    {
+      id: 2,
+      groupId: 2,
+      title: 'Prototype review',
+      date: '2026-04-06',
+      time: '18:00',
+      participantNames: ['Chloe', 'Daniel'],
+      generatedQuestions: [
+        'Which part of the prototype feels strongest for the demo?',
+        'What feedback needs to be folded in next?',
+        'Who owns the next revision?'
+      ]
+    }
   ],
   tasks: [
     { id: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
@@ -150,6 +174,11 @@ let teamMembersError = '';
 let loadedTeamMembersGroupId = null;
 let meetingAvailability = {};
 let meetingAvailabilityLoading = false;
+let groupCalls = [];
+let callsLoading = false;
+let callsError = '';
+let loadedCallsGroupId = null;
+let selectedCallId = null;
 
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
 const MEMBER_STAGES = ['Not set', 'To Do', 'In Progress', 'Review', 'Done'];
@@ -687,6 +716,120 @@ function getActiveTeamMembers() {
   return appData.members;
 }
 
+function normalizeCallRecord(call) {
+  return {
+    id: call.call_id || call.id,
+    groupId: call.group_id || call.groupId || null,
+    title: call.topic || call.title || 'Untitled call',
+    date: call.scheduled_date || call.date || '',
+    time: call.scheduled_time || call.time || '',
+    participantNames: Array.isArray(call.participant_names) ? call.participant_names : (call.participantNames || []),
+    generatedQuestions: Array.isArray(call.generated_questions) ? call.generated_questions : (call.generatedQuestions || []),
+    createdAt: call.created_at || call.createdAt || '',
+    createdBy: call.created_by || call.createdBy || null,
+    participantCount: Number(call.participant_count || call.participantNames?.length || 0)
+  };
+}
+
+function getCallsForActiveGroup() {
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) return [];
+  if (supabaseClient) return groupCalls;
+  return appData.scheduledCalls
+    .filter(call => String(call.groupId || activeGroup.id) === String(activeGroup.id))
+    .map(normalizeCallRecord);
+}
+
+function buildLocalCallQuestions(topic, participantNames = []) {
+  const teamLabel = participantNames.length ? participantNames.join(', ') : 'the team';
+  return [
+    `What does success for "${topic}" look like for ${teamLabel}?`,
+    `Which tasks or blockers should we resolve in this meeting?`,
+    'What needs an owner before the call ends?',
+    'What should happen next after this meeting?'
+  ];
+}
+
+async function generateCallQuestionsForTopic({ topic, groupName, participantNames, scheduledDate, scheduledTime }) {
+  const fallbackQuestions = buildLocalCallQuestions(topic, participantNames);
+
+  try {
+    const response = await fetch('/api/call-questions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        topic,
+        groupName,
+        participantNames,
+        scheduledDate,
+        scheduledTime
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Could not generate meeting questions.');
+    }
+
+    const questions = Array.isArray(payload?.questions)
+      ? payload.questions.map(question => String(question || '').trim()).filter(Boolean)
+      : [];
+
+    if (!questions.length) {
+      throw new Error('The AI question generator returned an empty list.');
+    }
+
+    return { questions, warning: '' };
+  } catch (error) {
+    return {
+      questions: fallbackQuestions,
+      warning: `${error.message || 'Could not use the AI question generator.'} Saved starter questions instead.`
+    };
+  }
+}
+
+async function loadGroupCallsForActiveGroup(force = false) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    groupCalls = [];
+    callsLoading = false;
+    callsError = '';
+    loadedCallsGroupId = activeGroup?.id || null;
+    renderCalls();
+    return;
+  }
+
+  if (!force && loadedCallsGroupId === activeGroup.id && (groupCalls.length || callsError)) {
+    renderCalls();
+    return;
+  }
+
+  callsLoading = true;
+  callsError = '';
+  renderCalls();
+
+  const { data, error } = await supabaseClient.rpc('get_chat_group_calls', {
+    target_group_id: activeGroup.id
+  });
+
+  callsLoading = false;
+
+  if (error) {
+    callsError = error.message;
+    loadedCallsGroupId = null;
+    renderCalls();
+    return;
+  }
+
+  groupCalls = (data || []).map(normalizeCallRecord)
+    .sort((a, b) => `${b.date}T${b.time}`.localeCompare(`${a.date}T${a.time}`));
+  loadedCallsGroupId = activeGroup.id;
+  callsError = '';
+  renderCalls();
+}
+
 function getMentionHandleForMember(member) {
   if (!member) return '';
   if (member.username) return member.username;
@@ -1162,6 +1305,7 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
     renderMemberDrivenViews();
+    renderCalls();
     loadMeetingAvailabilityForActiveGroup();
     return;
   }
@@ -1173,6 +1317,7 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
     renderMemberDrivenViews();
+    renderCalls();
     loadMeetingAvailabilityForActiveGroup();
     return;
   }
@@ -1197,12 +1342,14 @@ async function loadTeamMembersForActiveGroup() {
           : 'Team members RPC is not installed yet. Showing what could be read from the current tables.';
         teamMembersLoading = false;
         renderMemberDrivenViews();
+        renderCalls();
         return;
       } catch (fallbackError) {
         teamMembers = [];
         teamMembersError = 'Team members RPC is missing in Supabase, and the fallback table query also failed.';
         teamMembersLoading = false;
         renderMemberDrivenViews();
+        renderCalls();
         return;
       }
     }
@@ -1211,6 +1358,7 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersError = error.message || 'Could not load team members.';
     teamMembersLoading = false;
     renderMemberDrivenViews();
+    renderCalls();
     return;
   }
 
@@ -1220,6 +1368,7 @@ async function loadTeamMembersForActiveGroup() {
   teamMembersLoading = false;
   teamMembersError = '';
   renderMemberDrivenViews();
+  renderCalls();
   await loadMeetingAvailabilityForActiveGroup();
 }
 
@@ -1781,8 +1930,11 @@ function renderChat() {
     btn.addEventListener('click', () => {
       activeGroupId = btn.dataset.groupId;
       activeChannelId = getActiveGroup()?.channels[0]?.id || null;
+      loadedCallsGroupId = null;
+      selectedCallId = null;
       renderChat();
       loadTeamMembersForActiveGroup();
+      loadGroupCallsForActiveGroup();
     });
   });
 }
@@ -2225,47 +2377,145 @@ function syncPageMeetingBox() {
 }
 
 function bindCalls() {
-  $('#callForm').addEventListener('submit', e => {
+  $('#callForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const activeGroup = getActiveGroup();
+    const topic = $('#callTitle').value.trim();
+    const date = $('#callDate').value;
+    const time = $('#callTime').value;
+    const feedback = $('#callFormFeedback');
+
+    if (!activeGroup) {
+      feedback.textContent = 'Select a group before starting a call.';
+      return;
+    }
+
+    if (!topic || !date || !time) {
+      feedback.textContent = 'Enter a topic, date, and time.';
+      return;
+    }
+
+    const participants = getActiveTeamMembers();
+    const participantNames = participants.map(member => member.name).filter(Boolean);
+
+    feedback.textContent = 'Generating meeting questions...';
+    const { questions, warning } = await generateCallQuestionsForTopic({
+      topic,
+      groupName: activeGroup.name,
+      participantNames,
+      scheduledDate: date,
+      scheduledTime: time
+    });
+
+    if (supabaseClient && currentUser) {
+      feedback.textContent = 'Starting the call and saving it to Supabase...';
+
+      const { error } = await supabaseClient.rpc('create_chat_group_call', {
+        p_group_id: activeGroup.id,
+        p_call_topic: topic,
+        p_call_date: date,
+        p_call_time: time,
+        p_generated_questions: questions
+      });
+
+      if (error) {
+        feedback.textContent = error.message;
+        return;
+      }
+
+      e.target.reset();
+      selectedCallId = null;
+      feedback.textContent = warning || 'Call started and saved.';
+      await loadGroupCallsForActiveGroup(true);
+      return;
+    }
+
     appData.scheduledCalls.push({
       id: Date.now(),
-      title: $('#callTitle').value.trim(),
-      date: $('#callDate').value,
-      time: $('#callTime').value
+      groupId: activeGroup.id,
+      title: topic,
+      date,
+      time,
+      participantNames,
+      generatedQuestions: questions
     });
     e.target.reset();
+    selectedCallId = null;
+    feedback.textContent = warning || 'Call saved locally.';
     renderCalls();
   });
 }
 
 function renderCalls() {
-  $('#scheduledCalls').innerHTML = appData.scheduledCalls.map(call => `
-    <button class="call-item" data-call-id="${call.id}">
-      <h4>${call.title}</h4>
-      <div>${formatShortDate(call.date)} · ${formatTime(call.time)}</div>
-      <small class="muted">Click to highlight on calendar</small>
-    </button>
-  `).join('');
+  const activeGroup = getActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const participants = getActiveTeamMembers().map(member => member.name).filter(Boolean);
+  const note = $('#callParticipantsNote');
+  const feedback = $('#callFormFeedback');
 
-  const days = Array.from({ length: 14 }, (_, i) => i + 1);
-  let selectedDate = null;
-  $('#callCalendar').innerHTML = days.map(day => {
-    const matching = appData.scheduledCalls.filter(call => new Date(call.date).getDate() === day);
+  note.textContent = activeGroup
+    ? `${participants.length || 0} group member${participants.length === 1 ? '' : 's'} will be included automatically.`
+    : 'Select a group to start a team call.';
+
+  if (!activeGroup) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">Select a group chat first, then start a team call here.</p>';
+    $('#callCalendar').innerHTML = '';
+    if (!feedback.textContent) feedback.textContent = '';
+    return;
+  }
+
+  if (supabaseClient && loadedCallsGroupId !== activeGroup.id && !callsLoading) {
+    loadGroupCallsForActiveGroup();
+  }
+
+  if (callsLoading) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">Loading team calls...</p>';
+  } else if (callsError) {
+    $('#scheduledCalls').innerHTML = `<p class="muted">${escapeHtml(callsError)}</p>`;
+  } else if (!calls.length) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">No calls yet for this team. Start one below.</p>';
+  } else {
+    $('#scheduledCalls').innerHTML = calls.map(call => `
+      <button class="call-item ${String(call.id) === String(selectedCallId) ? 'active' : ''}" data-call-id="${call.id}">
+        <h4>${escapeHtml(call.title)}</h4>
+        <div>${formatShortDate(call.date)} · ${formatTime(call.time)}</div>
+        <small class="muted">${call.participantCount || call.participantNames.length} participant${(call.participantCount || call.participantNames.length) === 1 ? '' : 's'}</small>
+        <div class="call-participants">${call.participantNames.map(name => `<span class="call-chip">${escapeHtml(name)}</span>`).join('')}</div>
+        <div class="call-questions">
+          <strong>AI questions</strong>
+          <ul>
+            ${call.generatedQuestions.map(question => `<li>${escapeHtml(question)}</li>`).join('')}
+          </ul>
+        </div>
+      </button>
+    `).join('');
+  }
+
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const calendarDays = Array.from({ length: 14 }, (_, index) => {
+    const day = new Date(start);
+    day.setDate(start.getDate() + index);
+    return day;
+  });
+
+  $('#callCalendar').innerHTML = calendarDays.map(day => {
+    const dateKey = day.toISOString().slice(0, 10);
+    const matching = calls.filter(call => call.date === dateKey);
+    const isSelected = matching.some(call => String(call.id) === String(selectedCallId));
     return `
-      <div class="call-calendar-day" data-date="${day}">
-        <strong>${day}</strong>
-        ${matching.map(call => `<div class="call-chip">${call.title}</div>`).join('')}
+      <div class="call-calendar-day ${isSelected ? 'selected' : ''}" data-date="${dateKey}">
+        <strong>${day.getDate()}</strong>
+        <div class="muted">${day.toLocaleDateString([], { weekday: 'short' })}</div>
+        ${matching.map(call => `<div class="call-chip">${escapeHtml(call.title)}</div>`).join('')}
       </div>
     `;
   }).join('');
 
   $all('.call-item').forEach(btn => {
     btn.addEventListener('click', () => {
-      const call = appData.scheduledCalls.find(c => c.id === Number(btn.dataset.callId));
-      selectedDate = new Date(call.date).getDate();
-      $all('.call-calendar-day').forEach(cell => {
-        cell.style.outline = Number(cell.dataset.date) === selectedDate ? '3px solid #4f46e5' : 'none';
-      });
+      selectedCallId = btn.dataset.callId;
+      renderCalls();
     });
   });
 }

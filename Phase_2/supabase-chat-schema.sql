@@ -722,3 +722,199 @@ end;
 $$;
 
 grant execute on function public.add_chat_group_member_by_email(uuid, text) to authenticated;
+
+create table if not exists public.chat_group_calls (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  topic text not null,
+  scheduled_date date not null,
+  scheduled_time time not null,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  generated_questions text[] not null default '{}'::text[],
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.chat_group_call_participants (
+  call_id uuid not null references public.chat_group_calls(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now(),
+  primary key (call_id, user_id)
+);
+
+create index if not exists chat_group_calls_group_id_idx
+on public.chat_group_calls(group_id, scheduled_date, scheduled_time);
+
+create index if not exists chat_group_call_participants_call_id_idx
+on public.chat_group_call_participants(call_id);
+
+alter table public.chat_group_calls enable row level security;
+alter table public.chat_group_call_participants enable row level security;
+
+drop policy if exists "Members can read chat group calls" on public.chat_group_calls;
+drop policy if exists "Members can create chat group calls" on public.chat_group_calls;
+drop policy if exists "Members can read chat group call participants" on public.chat_group_call_participants;
+
+create policy "Members can read chat group calls"
+on public.chat_group_calls
+for select
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()));
+
+create policy "Members can create chat group calls"
+on public.chat_group_calls
+for insert
+to authenticated
+with check (
+  created_by = auth.uid()
+  and public.is_chat_group_member(group_id, auth.uid())
+);
+
+create policy "Members can read chat group call participants"
+on public.chat_group_call_participants
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.chat_group_calls
+    where chat_group_calls.id = chat_group_call_participants.call_id
+      and public.is_chat_group_member(chat_group_calls.group_id, auth.uid())
+  )
+);
+
+create or replace function public.get_chat_group_calls(target_group_id uuid)
+returns table(
+  call_id uuid,
+  group_id uuid,
+  topic text,
+  scheduled_date date,
+  scheduled_time time,
+  created_by uuid,
+  created_at timestamptz,
+  generated_questions text[],
+  participant_count integer,
+  participant_names text[]
+)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select
+    calls.id as call_id,
+    calls.group_id,
+    calls.topic,
+    calls.scheduled_date,
+    calls.scheduled_time,
+    calls.created_by,
+    calls.created_at,
+    calls.generated_questions,
+    count(participants.user_id)::integer as participant_count,
+    coalesce(
+      array_agg(distinct coalesce(profiles.full_name, profiles.username, profiles.email))
+        filter (where participants.user_id is not null),
+      '{}'::text[]
+    ) as participant_names
+  from public.chat_group_calls as calls
+  left join public.chat_group_call_participants as participants
+    on participants.call_id = calls.id
+  left join public.profiles as profiles
+    on profiles.id = participants.user_id
+  where calls.group_id = target_group_id
+    and public.is_chat_group_member(target_group_id, auth.uid())
+  group by calls.id
+  order by calls.scheduled_date desc, calls.scheduled_time desc, calls.created_at desc;
+$$;
+
+grant execute on function public.get_chat_group_calls(uuid) to authenticated;
+
+drop function if exists public.create_chat_group_call(uuid, text, date, time, text[]);
+
+create function public.create_chat_group_call(
+  p_group_id uuid,
+  p_call_topic text,
+  p_call_date date,
+  p_call_time time,
+  p_generated_questions text[]
+)
+returns table(
+  call_id uuid,
+  group_id uuid,
+  topic text,
+  scheduled_date date,
+  scheduled_time time,
+  created_by uuid,
+  created_at timestamptz,
+  generated_questions text[],
+  participant_count integer,
+  participant_names text[]
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  acting_user_id uuid;
+  new_call_id uuid;
+  saved_call record;
+begin
+  acting_user_id := auth.uid();
+
+  if acting_user_id is null then
+    raise exception 'You must be signed in to start a call';
+  end if;
+
+  if not public.is_chat_group_member(p_group_id, acting_user_id) then
+    raise exception 'You are not a member of this team';
+  end if;
+
+  insert into public.chat_group_calls (
+    group_id,
+    topic,
+    scheduled_date,
+    scheduled_time,
+    created_by,
+    generated_questions
+  )
+  values (
+    p_group_id,
+    p_call_topic,
+    p_call_date,
+    p_call_time,
+    acting_user_id,
+    coalesce(p_generated_questions, '{}'::text[])
+  )
+  returning id into new_call_id;
+
+  insert into public.chat_group_call_participants (call_id, user_id)
+  select new_call_id, memberships.user_id
+  from public.chat_group_members as memberships
+  where memberships.group_id = p_group_id
+  on conflict do nothing;
+
+  select c.*
+  into saved_call
+  from public.get_chat_group_calls(p_group_id) as c
+  where c.call_id = new_call_id
+  limit 1;
+
+  if saved_call is null then
+    return;
+  end if;
+
+  call_id := saved_call.call_id;
+  group_id := saved_call.group_id;
+  topic := saved_call.topic;
+  scheduled_date := saved_call.scheduled_date;
+  scheduled_time := saved_call.scheduled_time;
+  created_by := saved_call.created_by;
+  created_at := saved_call.created_at;
+  generated_questions := saved_call.generated_questions;
+  participant_count := saved_call.participant_count;
+  participant_names := saved_call.participant_names;
+
+  return next;
+end;
+$$;
+
+grant execute on function public.create_chat_group_call(uuid, text, date, time, text[]) to authenticated;

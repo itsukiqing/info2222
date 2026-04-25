@@ -265,11 +265,13 @@
             <div id="scheduledCalls" class="call-list"></div>
 
             <form id="callForm" class="stack-form">
-              <h4>Schedule a new call</h4>
-              <input id="callTitle" type="text" placeholder="Call title" required />
+              <h4>Start a team call</h4>
+              <input id="callTitle" type="text" placeholder="Meeting topic" required />
               <input id="callDate" type="date" required />
               <input id="callTime" type="time" required />
-              <button class="primary-btn" type="submit">Add to calendar</button>
+              <p id="callParticipantsNote" class="muted">Everyone in the current team will be included automatically.</p>
+              <button class="primary-btn" type="submit">Start call</button>
+              <p id="callFormFeedback" class="feedback-text login-feedback" role="alert"></p>
             </form>
           </div>
 
