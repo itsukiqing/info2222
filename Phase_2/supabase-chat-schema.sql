@@ -1,3 +1,32 @@
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  username text unique,
+  email text unique not null,
+  full_name text,
+  role text default 'Team member',
+  password_hash text,
+  password_salt text,
+  password_iterations integer,
+  password_algorithm text default 'pbkdf2-sha256',
+  created_at timestamptz default now()
+);
+
+alter table public.profiles add column if not exists password_hash text;
+alter table public.profiles add column if not exists password_salt text;
+alter table public.profiles add column if not exists password_iterations integer;
+alter table public.profiles add column if not exists password_algorithm text default 'pbkdf2-sha256';
+
+create table if not exists public.app_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists app_sessions_user_id_idx
+on public.app_sessions(user_id);
+
 create table if not exists public.chat_groups (
   id uuid primary key default gen_random_uuid(),
   name text not null,

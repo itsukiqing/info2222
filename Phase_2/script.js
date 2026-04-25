@@ -218,6 +218,34 @@ function $all(selector) {
   return [...document.querySelectorAll(selector)];
 }
 
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    credentials: 'same-origin',
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Request failed.');
+  }
+  return payload;
+}
+
+async function performBackendAction(action, payload = {}) {
+  return apiRequest('/api/app-action', {
+    method: 'POST',
+    body: {
+      action,
+      ...payload
+    }
+  });
+}
+
 async function init() {
   bindAuth();
   initSupabaseClient();
@@ -298,8 +326,9 @@ function bindAuth() {
 
   $('#logoutBtn').addEventListener('click', async () => {
     if (supabaseClient) {
-      const { error } = await supabaseClient.auth.signOut();
-      if (error) {
+      try {
+        await apiRequest('/api/auth/logout', { method: 'POST' });
+      } catch (error) {
         $('#loginFeedback').textContent = error.message;
         return;
       }
@@ -325,6 +354,90 @@ function bindAuth() {
   });
 }
 
+function mapBackendStateGroup(group) {
+  return {
+    id: group.id,
+    name: group.name,
+    createdBy: group.createdBy || null,
+    leaderId: group.leaderId || group.createdBy || null,
+    channels: (group.channels || []).map(channel => ({
+      id: channel.id,
+      name: channel.name,
+      messages: (channel.messages || []).map(message => ({
+        id: message.id,
+        senderId: message.senderId || null,
+        sender: message.sender || 'Unknown',
+        text: message.text || '',
+        time: message.time || formatChatTimestamp(message.createdAt),
+        date: message.date || (message.createdAt || '').slice(0, 10),
+        createdAt: message.createdAt || ''
+      }))
+    })),
+    members: (group.members || []).map(normalizeTeamMember),
+    availability: group.availability || createEmptyMeetingAvailability((group.members || []).map(member => member.full_name || member.name || member.username || member.email)),
+    calls: (group.calls || []).map(normalizeCallRecord),
+    tasks: (group.tasks || []).map(normalizeTaskRecord)
+  };
+}
+
+function syncDerivedStateFromActiveGroup() {
+  const activeGroup = getActiveGroup();
+  const members = activeGroup?.members || [];
+  teamMembers = members.map(normalizeTeamMember);
+  teamMembersLoading = false;
+  teamMembersError = '';
+  loadedTeamMembersGroupId = activeGroup?.id || null;
+
+  groupCalls = (activeGroup?.calls || []).map(normalizeCallRecord);
+  callsLoading = false;
+  callsError = '';
+  loadedCallsGroupId = activeGroup?.id || null;
+
+  groupTasks = (activeGroup?.tasks || []).map(normalizeTaskRecord);
+  tasksLoading = false;
+  tasksError = '';
+  loadedTasksGroupId = activeGroup?.id || null;
+
+  syncMeetingAvailabilityMembers();
+  if (activeGroup?.availability) {
+    meetingAvailability = activeGroup.availability;
+  } else if (!supabaseClient) {
+    Object.entries(appData.availability).forEach(([day, membersByDay]) => {
+      if (!meetingAvailability[day]) return;
+      Object.entries(membersByDay).forEach(([name, slots]) => {
+        if (meetingAvailability[day][name]) {
+          meetingAvailability[day][name] = [...slots];
+        }
+      });
+    });
+  }
+  meetingAvailabilityLoading = false;
+}
+
+async function loadBackendState() {
+  if (!supabaseClient || !currentUser) return;
+
+  chatLoading = true;
+  chatLoadError = '';
+  renderChat();
+
+  try {
+    const payload = await apiRequest('/api/app-state');
+    currentUser = payload.user || currentUser;
+    availableChatMembers = payload.memberDirectory || [];
+    appData.groups = (payload.groups || []).map(mapBackendStateGroup);
+    ensureActiveChatSelection();
+    syncDerivedStateFromActiveGroup();
+    renderGroupMemberPicker();
+  } catch (error) {
+    chatLoadError = error.message || 'Could not load app data.';
+  } finally {
+    chatLoading = false;
+    renderAll();
+    renderChat();
+  }
+}
+
 function initSupabaseClient() {
   const config = window.UNIGROUP_SUPABASE_CONFIG || {};
   const hasRealConfig =
@@ -333,71 +446,32 @@ function initSupabaseClient() {
     config.url !== SUPABASE_PLACEHOLDER_URL &&
     config.anonKey !== SUPABASE_PLACEHOLDER_ANON_KEY;
 
-  if (!hasRealConfig || !window.supabase) {
+  if (!hasRealConfig) {
     authMode = 'demo';
     return;
   }
 
-  supabaseClient = window.supabase.createClient(config.url, config.anonKey);
-  authMode = 'supabase';
-  supabaseClient.auth.onAuthStateChange((_event, session) => {
-    console.debug(`[auth] state changed: ${_event}`);
-
-    window.setTimeout(async () => {
-      const profile = session ? await getProfileForUserId(session.user.id) : null;
-      currentUser = getUserFromSupabaseSession(session, profile);
-      if (currentUser) initDatabaseChat();
-      else teardownDatabaseChat();
-      renderChat();
-      syncAuthView();
-    }, 0);
-  });
+  supabaseClient = { customBackend: true };
+  authMode = 'custom';
 }
 
 async function signInWithSupabase(email, password) {
   $('#loginFeedback').textContent = 'Signing in...';
-  let authTimerRunning = false;
-  let profileTimerRunning = false;
-
   try {
-    console.time('auth:signInWithPassword');
-    authTimerRunning = true;
-    const { data, error } = await withTimeout(
-      supabaseClient.auth.signInWithPassword({ email, password }),
+    const payload = await withTimeout(
+      apiRequest('/api/auth/login', {
+        method: 'POST',
+        body: { email, password }
+      }),
       SUPABASE_AUTH_TIMEOUT_MS,
-      'Sign in timed out. Check your internet connection and Supabase project settings.'
+      'Sign in timed out. Check your internet connection and backend settings.'
     );
-    console.timeEnd('auth:signInWithPassword');
-    authTimerRunning = false;
-
-    if (error) {
-      $('#loginFeedback').textContent = error.message;
-      return;
-    }
-
-    if (!data.session) {
-      $('#loginFeedback').textContent = 'Sign in did not return a session. Check Supabase Auth settings.';
-      return;
-    }
-
-    console.time('auth:profileFetch');
-    profileTimerRunning = true;
-    const profile = await withTimeout(
-      getProfileForUserId(data.session.user.id),
-      SUPABASE_AUTH_TIMEOUT_MS,
-      'Profile lookup timed out. Check the profiles table policy.'
-    );
-    console.timeEnd('auth:profileFetch');
-    profileTimerRunning = false;
-    currentUser = getUserFromSupabaseSession(data.session, profile);
+    currentUser = payload.user || null;
     $('#loginForm').reset();
     $('#loginFeedback').textContent = '';
-    renderChat();
+    await loadBackendState();
     syncAuthView();
-    initDatabaseChat();
   } catch (error) {
-    if (authTimerRunning) console.timeEnd('auth:signInWithPassword');
-    if (profileTimerRunning) console.timeEnd('auth:profileFetch');
     $('#loginFeedback').textContent = error.message || 'Could not sign in.';
   }
 }
@@ -426,70 +500,24 @@ async function registerUser(email, password) {
 
 async function registerWithSupabase(email, password, username, fullName) {
   $('#loginFeedback').textContent = 'Creating account...';
-  const { data, error } = await supabaseClient.auth.signUp({
-    email,
-    password,
-    options: {
-      data: {
-        username,
-        full_name: fullName,
-        email
-      }
-    }
-  });
-
-  if (error) {
-    $('#loginFeedback').textContent = error.message;
-    return;
-  }
-
-  $('#loginForm').reset();
-
-  if (!data.session) {
-    $('#loginFeedback').textContent = 'Account created, but Supabase email confirmation is still enabled. Turn off Confirm email to auto-login after register.';
-    authFormMode = 'login';
-    syncAuthFormMode();
-    return;
-  }
-
-  const profileSaved = await saveSupabaseProfile(data.user.id, username, email, fullName);
-  if (!profileSaved) {
-    $('#loginFeedback').textContent = 'Account created, but the profile was not saved. Check the profiles table policies.';
-    return;
-  }
-
-  currentUser = getUserFromSupabaseSession(data.session, {
-    id: data.user.id,
-    username,
-    email,
-    full_name: fullName,
-    role: 'Team member'
-  });
-  $('#loginFeedback').textContent = '';
-  renderChat();
-  syncAuthView();
-  initDatabaseChat();
-}
-
-async function saveSupabaseProfile(id, username, email, fullName) {
-  const { error } = await supabaseClient
-    .from('profiles')
-    .upsert(
-      {
-        id,
-        username,
+  try {
+    const payload = await apiRequest('/api/auth/register', {
+      method: 'POST',
+      body: {
         email,
-        full_name: fullName
-      },
-      { onConflict: 'id' }
-    );
-
-  if (error) {
-    console.warn('Could not save profile after signup:', error.message);
-    return false;
+        password,
+        username,
+        fullName
+      }
+    });
+    currentUser = payload.user || null;
+    $('#loginForm').reset();
+    $('#loginFeedback').textContent = '';
+    await loadBackendState();
+    syncAuthView();
+  } catch (error) {
+    $('#loginFeedback').textContent = error.message || 'Could not create the account.';
   }
-
-  return true;
 }
 
 function registerDemoUser(email, password, username, fullName) {
@@ -537,10 +565,13 @@ function getDemoUsers() {
 
 async function restoreSession() {
   if (supabaseClient) {
-    const { data, error } = await supabaseClient.auth.getSession();
-    const profile = !error && data.session ? await getProfileForUserId(data.session.user.id) : null;
-    currentUser = error ? null : getUserFromSupabaseSession(data.session, profile);
-    if (currentUser) initDatabaseChat();
+    try {
+      const payload = await apiRequest('/api/auth/me');
+      currentUser = payload.user || null;
+      if (currentUser) await loadBackendState();
+    } catch (error) {
+      currentUser = null;
+    }
     return;
   }
 
@@ -554,36 +585,6 @@ async function restoreSession() {
     currentUser = null;
     localStorage.removeItem(AUTH_STORAGE_KEY);
   }
-}
-
-async function getProfileForUserId(id) {
-  const { data, error } = await supabaseClient
-    .from('profiles')
-    .select('id, username, email, full_name, role')
-    .eq('id', id)
-    .maybeSingle();
-
-  if (error) return null;
-  return data || null;
-}
-
-function getUserFromSupabaseSession(session, profile = null) {
-  if (!session || !session.user) return null;
-  const user = session.user;
-  const displayName =
-    profile?.full_name ||
-    user.user_metadata?.full_name ||
-    user.user_metadata?.name ||
-    user.email?.split('@')[0] ||
-    'Student';
-
-  return {
-    id: user.id,
-    username: profile?.username || user.user_metadata?.username || '',
-    name: displayName,
-    email: profile?.email || user.email || 'Signed in',
-    role: profile?.role || user.user_metadata?.role || 'Team member'
-  };
 }
 
 function syncAuthView() {
@@ -621,10 +622,10 @@ function syncAuthFormMode() {
 function syncAuthHint() {
   const hint = $('#authHint');
 
-  if (authMode === 'supabase') {
+  if (authMode === 'custom') {
     hint.innerHTML = `
-      <strong>Supabase Auth</strong>
-      <span>Log in or register with email and password.</span>
+      <strong>Custom auth</strong>
+      <span>Passwords are stored with PBKDF2 + salt in your database, and the app signs in through server-side sessions.</span>
     `;
     return;
   }
@@ -837,34 +838,12 @@ async function loadGroupCallsForActiveGroup(force = false) {
     return;
   }
 
-  if (!force && loadedCallsGroupId === activeGroup.id && (groupCalls.length || callsError)) {
-    renderCalls();
-    renderCatchupHighlights();
+  if (force) {
+    await loadBackendState();
     return;
   }
 
-  callsLoading = true;
-  callsError = '';
-  renderCalls();
-
-  const { data, error } = await supabaseClient.rpc('get_chat_group_calls', {
-    target_group_id: activeGroup.id
-  });
-
-  callsLoading = false;
-
-  if (error) {
-    callsError = error.message;
-    loadedCallsGroupId = null;
-    renderCalls();
-    renderCatchupHighlights();
-    return;
-  }
-
-  groupCalls = (data || []).map(normalizeCallRecord)
-    .sort((a, b) => `${b.date}T${b.time}`.localeCompare(`${a.date}T${a.time}`));
-  loadedCallsGroupId = activeGroup.id;
-  callsError = '';
+  syncDerivedStateFromActiveGroup();
   renderCalls();
   renderCatchupHighlights();
 }
@@ -1067,35 +1046,7 @@ async function loadMeetingAvailabilityForActiveGroup() {
     return;
   }
 
-  const activeGroup = getActiveGroup();
-  if (!activeGroup) {
-    renderMeeting();
-    return;
-  }
-
-  meetingAvailabilityLoading = true;
-  renderMeeting();
-
-  const { data, error } = await supabaseClient.rpc('get_chat_group_availability', {
-    target_group_id: activeGroup.id
-  });
-
-  if (!error) {
-    meetingAvailability = mapAvailabilityRowsToState(data);
-    meetingAvailabilityLoading = false;
-    renderMeeting();
-    return;
-  }
-
-  const { data: fallbackRows, error: fallbackError } = await supabaseClient
-    .from('chat_group_member_availability')
-    .select('user_id, day_name, slots')
-    .eq('group_id', activeGroup.id);
-
-  if (!fallbackError) {
-    meetingAvailability = mapAvailabilityRowsToState(fallbackRows);
-  }
-
+  syncDerivedStateFromActiveGroup();
   meetingAvailabilityLoading = false;
   renderMeeting();
 }
@@ -1109,32 +1060,12 @@ async function saveCurrentUserAvailability(day, slots) {
 
   const activeGroup = getActiveGroup();
   if (!activeGroup) throw new Error('Select a team first.');
-
-  const payload = {
-    target_group_id: activeGroup.id,
-    target_day_name: day,
-    target_slots: slots
-  };
-
-  const { error } = await supabaseClient.rpc('upsert_my_chat_group_availability', payload);
-  if (!error) return;
-
-  const { error: fallbackError } = await supabaseClient
-    .from('chat_group_member_availability')
-    .upsert({
-      group_id: activeGroup.id,
-      user_id: currentUser.id,
-      day_name: day,
-      slots,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'group_id,user_id,day_name' });
-
-  if (fallbackError) {
-    if (String(error.message || '').includes('column reference "user_id" is ambiguous')) {
-      throw new Error('The meeting availability function in Supabase needs the latest SQL update. Re-run supabase-chat-schema.sql, then try again.');
-    }
-    throw fallbackError;
-  }
+  await performBackendAction('save_availability', {
+    groupId: activeGroup.id,
+    day,
+    slots
+  });
+  await loadBackendState();
 }
 
 async function saveCurrentUserDeadline(deadline) {
@@ -1152,44 +1083,16 @@ async function saveCurrentUserDeadline(deadline) {
   if (!activeGroup) {
     throw new Error('Select a team first.');
   }
-
-  const rpcPayload = {
-    p_group_id: activeGroup.id,
-    p_user_id: currentUser.id,
-    p_role: activeMember?.role || '',
-    p_current_task: activeMember?.currentTask || '',
-    p_stage: activeMember?.stage || 'Not set',
-    p_workload: activeMember?.workload || 'Not set',
-    p_deadline: normalizedDeadline
-  };
-
-  const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', rpcPayload);
-
-  if (error) {
-    const { error: fallbackError } = await supabaseClient
-      .from('chat_group_member_profiles')
-      .upsert({
-        group_id: activeGroup.id,
-        user_id: currentUser.id,
-        role: activeMember?.role || null,
-        current_task: activeMember?.currentTask || null,
-        stage: activeMember?.stage || 'Not set',
-        workload: activeMember?.workload || 'Not set',
-        deadline: normalizedDeadline,
-        updated_by: currentUser.id,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'group_id,user_id' });
-
-    if (fallbackError) {
-      throw error;
-    }
-
-    await loadTeamMembersForActiveGroup();
-    return;
-  }
-
-  const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
-  teamMembers = teamMembers.map(member => String(member.id) === String(currentUser.id) ? savedMember : member);
+  await performBackendAction('save_member_profile', {
+    groupId: activeGroup.id,
+    userId: currentUser.id,
+    role: activeMember?.role || '',
+    currentTask: activeMember?.currentTask || '',
+    stage: activeMember?.stage || 'Not set',
+    workload: activeMember?.workload || 'Not set',
+    deadline: normalizedDeadline
+  });
+  await loadBackendState();
 }
 
 function renderDashboard() {
@@ -1327,14 +1230,10 @@ async function initDatabaseChat() {
   if (!supabaseClient || !currentUser) return;
   if (chatInitInProgress) return;
   chatInitInProgress = true;
-  console.time('chat:init');
   try {
-    await loadChatMemberDirectory();
-    await loadChatFromDatabase();
-    subscribeToChatChanges();
+    await loadBackendState();
   } finally {
     chatInitInProgress = false;
-    console.timeEnd('chat:init');
   }
 }
 
@@ -1350,84 +1249,14 @@ async function loadTeamMembersForActiveGroup() {
     return;
   }
 
-  const activeGroup = getActiveGroup();
-  if (!activeGroup) {
-    teamMembers = [];
-    teamMembersError = '';
-    teamMembersLoading = false;
-    loadedTeamMembersGroupId = null;
-    renderMemberDrivenViews();
-    renderCalls();
-    loadMeetingAvailabilityForActiveGroup();
-    return;
-  }
-
-  teamMembersLoading = true;
-  teamMembersError = '';
-  loadedTeamMembersGroupId = activeGroup.id;
-  renderMemberDrivenViews();
-
-  const { data, error } = await supabaseClient.rpc('get_chat_group_members', {
-    target_group_id: activeGroup.id
-  });
-
-  if (error) {
-    if (isMissingRpcError(error, 'get_chat_group_members')) {
-      try {
-        const fallbackMembers = await loadTeamMembersFromTables(activeGroup.id);
-        if (loadedTeamMembersGroupId !== activeGroup.id) return;
-        teamMembers = fallbackMembers;
-        teamMembersError = fallbackMembers.length
-          ? ''
-          : 'Team members RPC is not installed yet. Showing what could be read from the current tables.';
-        teamMembersLoading = false;
-        renderMemberDrivenViews();
-        renderCalls();
-        return;
-      } catch (fallbackError) {
-        teamMembers = [];
-        teamMembersError = 'Team members RPC is missing in Supabase, and the fallback table query also failed.';
-        teamMembersLoading = false;
-        renderMemberDrivenViews();
-        renderCalls();
-        return;
-      }
-    }
-
-    teamMembers = [];
-    teamMembersError = error.message || 'Could not load team members.';
-    teamMembersLoading = false;
-    renderMemberDrivenViews();
-    renderCalls();
-    return;
-  }
-
-  if (loadedTeamMembersGroupId !== activeGroup.id) return;
-
-  teamMembers = (data || []).map(normalizeTeamMember);
-  teamMembersLoading = false;
-  teamMembersError = '';
+  syncDerivedStateFromActiveGroup();
   renderMemberDrivenViews();
   renderCalls();
-  await loadMeetingAvailabilityForActiveGroup();
+  renderMeeting();
 }
 
 async function loadChatMemberDirectory() {
   if (!supabaseClient || !currentUser) return;
-
-  const { data, error } = await supabaseClient
-    .from('profiles')
-    .select('id, username, full_name, email')
-    .order('full_name', { ascending: true });
-
-  if (error) {
-    console.warn('Could not load chat member directory:', error.message);
-    availableChatMembers = [];
-    renderGroupMemberPicker();
-    return;
-  }
-
-  availableChatMembers = data || [];
   renderGroupMemberPicker();
 }
 
@@ -1459,101 +1288,16 @@ function renderGroupMemberPicker() {
 }
 
 function teardownDatabaseChat() {
-  if (!supabaseClient || !chatSubscription) return;
-  supabaseClient.removeChannel(chatSubscription);
   chatSubscription = null;
 }
 
 function subscribeToChatChanges() {
-  if (!supabaseClient || chatSubscription) return;
-
-  const reloadChat = debounce(() => {
-    loadChatFromDatabase();
-  }, 250);
-
-  chatSubscription = supabaseClient
-    .channel('unigroup-chat-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_groups' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_members' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_member_profiles' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_channels' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, reloadChat)
-    .subscribe();
+  return;
 }
 
 async function loadChatFromDatabase() {
   if (!supabaseClient || !currentUser) return;
-
-  const loadVersion = ++chatLoadVersion;
-  chatLoading = true;
-  chatLoadError = '';
-  console.time('chat:loadFromDatabase');
-
-  try {
-    const { data: chatState, error: chatStateError } = await supabaseClient.rpc('get_my_chat_state');
-    if (chatStateError) throw chatStateError;
-
-    const groups = chatState?.groups || [];
-    const channels = chatState?.channels || [];
-    const messages = chatState?.messages || [];
-
-    if (!groups.length) {
-      if (loadVersion !== chatLoadVersion) return;
-      appData.groups = [];
-      activeGroupId = null;
-      activeChannelId = null;
-      await loadTeamMembersForActiveGroup();
-      return;
-    }
-
-    if (loadVersion !== chatLoadVersion) return;
-    appData.groups = mapChatRowsToGroups(groups, channels, messages);
-    ensureActiveChatSelection();
-    await loadTeamMembersForActiveGroup();
-  } catch (error) {
-    if (loadVersion !== chatLoadVersion) return;
-    chatLoadError = error.message || 'Could not load chat from Supabase.';
-    console.error('Chat load failed:', error);
-  } finally {
-    if (loadVersion !== chatLoadVersion) return;
-    chatLoading = false;
-    console.timeEnd('chat:loadFromDatabase');
-    renderChat();
-  }
-}
-
-function mapChatRowsToGroups(groups, channels, messages) {
-  const channelsByGroup = channels.reduce((acc, channel) => {
-    if (!acc[channel.group_id]) acc[channel.group_id] = [];
-    acc[channel.group_id].push(channel);
-    return acc;
-  }, {});
-
-  const messagesByChannel = messages.reduce((acc, message) => {
-    if (!acc[message.channel_id]) acc[message.channel_id] = [];
-    acc[message.channel_id].push(message);
-    return acc;
-  }, {});
-
-  return groups.map(group => ({
-    id: group.id,
-    name: group.name,
-    createdBy: group.created_by || null,
-    leaderId: group.leader_id || group.created_by || null,
-    channels: (channelsByGroup[group.id] || []).map(channel => ({
-      id: channel.id,
-      name: channel.name,
-      messages: (messagesByChannel[channel.id] || []).map(message => ({
-        id: message.id,
-        senderId: message.sender_id,
-        sender: message.sender_name,
-        text: message.body,
-        time: formatChatTimestamp(message.created_at),
-        date: message.created_at.slice(0, 10),
-        createdAt: message.created_at
-      }))
-    }))
-  }));
+  await loadBackendState();
 }
 
 function ensureActiveChatSelection() {
@@ -2123,37 +1867,21 @@ function bindChat() {
         return;
       }
 
-      const { data: messageData, error } = await supabaseClient.rpc('send_chat_message', {
-        target_group_id: activeGroup.id,
-        target_channel_id: activeChannel.id,
-        message_body: text,
-        sender_display_name: currentUser.name
-      });
-
-      if (error) {
+      try {
+        await performBackendAction('send_message', {
+          groupId: activeGroup.id,
+          channelId: activeChannel.id,
+          body: text
+        });
+      } catch (error) {
         chatLoadError = error.message;
         renderChat();
         return;
       }
-
-      const createdMessage = Array.isArray(messageData) ? messageData[0] : messageData;
-      chatLoadVersion += 1;
-      activeChannel.messages.push({
-        id: createdMessage?.message_id || `local-${Date.now()}`,
-        senderId: currentUser.id,
-        sender: currentUser.name,
-        text,
-        time: formatChatTimestamp(createdMessage?.created_at || new Date().toISOString()),
-        date: (createdMessage?.created_at || new Date().toISOString()).slice(0, 10),
-        createdAt: createdMessage?.created_at || new Date().toISOString(),
-        channelId: activeChannel.id,
-        channelName: activeChannel.name
-      });
       input.value = '';
       closeMentionSuggestions();
       chatLoadError = '';
-      renderChat();
-      loadChatFromDatabase();
+      await loadBackendState();
       return;
     }
 
@@ -2450,17 +2178,17 @@ function bindCalls() {
     });
 
     if (supabaseClient && currentUser) {
-      feedback.textContent = 'Starting the call and saving it to Supabase...';
+      feedback.textContent = 'Starting the call and saving it...';
 
-      const { error } = await supabaseClient.rpc('create_chat_group_call', {
-        p_group_id: activeGroup.id,
-        p_call_topic: topic,
-        p_call_date: date,
-        p_call_time: time,
-        p_generated_questions: questions
-      });
-
-      if (error) {
+      try {
+        await performBackendAction('create_call', {
+          groupId: activeGroup.id,
+          topic,
+          date,
+          time,
+          generatedQuestions: questions
+        });
+      } catch (error) {
         feedback.textContent = error.message;
         return;
       }
@@ -2468,7 +2196,7 @@ function bindCalls() {
       e.target.reset();
       selectedCallId = null;
       feedback.textContent = warning || 'Call started and saved.';
-      await loadGroupCallsForActiveGroup(true);
+      await loadBackendState();
       return;
     }
 
@@ -2579,39 +2307,12 @@ async function loadTasksForActiveGroup(force = false) {
     return;
   }
 
-  if (!force && loadedTasksGroupId === activeGroup.id && (groupTasks.length || tasksError)) {
-    renderTasks();
-    renderDashboard();
-    renderCatchupHighlights();
+  if (force) {
+    await loadBackendState();
     return;
   }
 
-  tasksLoading = true;
-  tasksError = '';
-  renderTasks();
-
-  const { data, error } = await supabaseClient
-    .from('chat_group_tasks')
-    .select('id, group_id, title, assignee_name, assignee_user_id, priority_rank, duration_days, status, created_by, created_at')
-    .eq('group_id', activeGroup.id)
-    .order('priority_rank', { ascending: true })
-    .order('created_at', { ascending: false });
-
-  tasksLoading = false;
-
-  if (error) {
-    groupTasks = [];
-    tasksError = error.message || 'Could not load tasks.';
-    loadedTasksGroupId = null;
-    renderTasks();
-    renderDashboard();
-    renderCatchupHighlights();
-    return;
-  }
-
-  groupTasks = (data || []).map(normalizeTaskRecord);
-  loadedTasksGroupId = activeGroup.id;
-  tasksError = '';
+  syncDerivedStateFromActiveGroup();
   renderTasks();
   renderDashboard();
   renderCatchupHighlights();
@@ -2625,13 +2326,11 @@ async function saveTaskStatus(taskId, status) {
     return;
   }
 
-  const { error } = await supabaseClient
-    .from('chat_group_tasks')
-    .update({ status })
-    .eq('id', taskId)
-    .eq('group_id', activeGroup.id);
-
-  if (error) throw error;
+  await performBackendAction('update_task_status', {
+    groupId: activeGroup.id,
+    taskId,
+    status
+  });
 }
 
 function bindTasks() {
@@ -2650,20 +2349,16 @@ function bindTasks() {
     }
 
     if (supabaseClient && currentUser) {
-      const { error } = await supabaseClient
-        .from('chat_group_tasks')
-        .insert({
-          group_id: activeGroup.id,
+      try {
+        await performBackendAction('create_task', {
+          groupId: activeGroup.id,
           title,
-          assignee_name: assignee,
-          assignee_user_id: assignee === 'N/A' ? null : assigneeMember?.id || null,
-          priority_rank: priorityRank,
-          duration_days: durationDays,
-          status: assignee === 'N/A' ? 'Not Assigned' : 'Not Started',
-          created_by: currentUser.id
+          assignee,
+          assigneeUserId: assignee === 'N/A' ? null : assigneeMember?.id || null,
+          priorityRank,
+          durationDays
         });
-
-      if (error) {
+      } catch (error) {
         tasksError = error.message;
         renderTasks();
         return;
@@ -2673,7 +2368,7 @@ function bindTasks() {
       $('#taskPriority').value = '3';
       $('#taskDuration').value = '3';
       tasksError = '';
-      await loadTasksForActiveGroup(true);
+      await loadBackendState();
       return;
     }
 
@@ -3061,55 +2756,24 @@ function bindGroupModal() {
         ...$all('.group-member-checkbox:checked').map(input => input.value)
       ].filter(Boolean);
 
-      const { data: groupData, error: groupError } = await supabaseClient.rpc('create_chat_group', {
-        group_name: name,
-        first_channel_name: topic,
-        member_ids: selectedMemberIds
-      });
-
-      if (groupError) {
-        chatLoadError = groupError.message;
+      try {
+        const payload = await performBackendAction('create_group', {
+          name,
+          topic,
+          memberIds: selectedMemberIds
+        });
+        activeGroupId = payload.groupId || null;
+        activeChannelId = payload.channelId || null;
+      } catch (error) {
+        chatLoadError = error.message;
         renderChat();
         return;
       }
-
-      const createdGroup = Array.isArray(groupData) ? groupData[0] : groupData;
-      chatLoadVersion += 1;
-      appData.groups.unshift({
-        id: createdGroup?.group_id,
-        name,
-        createdBy: currentUser.id,
-        leaderId: currentUser.id,
-        channels: [
-          {
-            id: createdGroup?.channel_id,
-            name: topic,
-            messages: [
-              {
-                id: `local-${Date.now()}`,
-                senderId: currentUser.id,
-                sender: 'System',
-                text: `Welcome to ${name}.`,
-                time: 'Now',
-                date: new Date().toISOString().slice(0, 10),
-                createdAt: new Date().toISOString()
-              }
-            ]
-          }
-        ]
-      });
-
-      activeGroupId = createdGroup?.group_id || null;
-      activeChannelId = createdGroup?.channel_id || null;
       chatLoadError = '';
       ensureActiveChatSelection();
       e.target.reset();
       $('#groupModal').classList.add('hidden');
-      renderChat();
-      await loadChatFromDatabase();
-      ensureActiveChatSelection();
-      await loadTeamMembersForActiveGroup();
-      renderChat();
+      await loadBackendState();
       return;
     }
 
@@ -3176,34 +2840,18 @@ function bindAddMemberModal() {
       return;
     }
 
-    let addedMember = null;
-
     try {
-      const { data, error } = await supabaseClient.rpc('add_chat_group_member_by_email', {
-        target_group_id: activeGroup.id,
-        member_email: email
+      const addedMember = await performBackendAction('add_member_by_email', {
+        groupId: activeGroup.id,
+        email
       });
-
-      if (error) {
-        if (isMissingRpcError(error, 'add_chat_group_member_by_email')) {
-          addedMember = await addMemberByEmailFallback(activeGroup.id, email);
-        } else {
-          throw error;
-        }
-      } else {
-        addedMember = Array.isArray(data) ? data[0] : data;
-      }
+      $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
     } catch (error) {
       $('#addMemberFeedback').textContent = error.message || 'Could not add that member.';
       return;
     }
-
-    $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
     $('#addMemberForm').reset();
-    chatLoadVersion += 1;
-    loadChatMemberDirectory();
-    await loadChatFromDatabase();
-    await loadTeamMembersForActiveGroup();
+    await loadBackendState();
     window.setTimeout(() => {
       $('#addMemberModal').classList.add('hidden');
       $('#addMemberFeedback').textContent = '';
@@ -3242,44 +2890,34 @@ function bindMembersDirectory() {
 
     if (button.dataset.action === 'set-leader') {
       feedback.textContent = 'Updating leader...';
-      const { error } = await supabaseClient.rpc('set_chat_group_leader', {
-        target_group_id: activeGroup.id,
-        target_user_id: memberId
-      });
-
-      if (error) {
-        if (isMissingRpcError(error, 'set_chat_group_leader')) {
-          feedback.textContent = 'Leader management is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
-          return;
-        }
+      try {
+        await performBackendAction('set_leader', {
+          groupId: activeGroup.id,
+          userId: memberId
+        });
+      } catch (error) {
         feedback.textContent = error.message;
         return;
       }
 
-      await loadChatFromDatabase();
-      await loadTeamMembersForActiveGroup();
+      await loadBackendState();
       feedback.textContent = 'Leader updated.';
       return;
     }
 
     if (button.dataset.action === 'remove-member') {
       feedback.textContent = 'Removing member...';
-      const { error } = await supabaseClient.rpc('remove_chat_group_member', {
-        target_group_id: activeGroup.id,
-        target_user_id: memberId
-      });
-
-      if (error) {
-        if (isMissingRpcError(error, 'remove_chat_group_member')) {
-          feedback.textContent = 'Member removal is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
-          return;
-        }
+      try {
+        await performBackendAction('remove_member', {
+          groupId: activeGroup.id,
+          userId: memberId
+        });
+      } catch (error) {
         feedback.textContent = error.message;
         return;
       }
 
-      await loadChatFromDatabase();
-      await loadTeamMembersForActiveGroup();
+      await loadBackendState();
       feedback.textContent = 'Member removed.';
     }
   });
@@ -3323,29 +2961,23 @@ function bindMembersDirectory() {
       return;
     }
 
-    const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', {
-      p_group_id: activeGroup.id,
-      p_user_id: memberId,
-      p_role: payload.role,
-      p_current_task: payload.currentTask,
-      p_stage: payload.stage,
-      p_workload: payload.workload,
-      p_deadline: payload.deadline || null
-    });
-
-    if (error) {
-      if (isMissingRpcError(error, 'upsert_chat_group_member_profile')) {
-        feedback.textContent = 'The save RPC is not installed in Supabase yet. Re-run supabase-chat-schema.sql, then try again.';
-        return;
-      }
+    try {
+      await performBackendAction('save_member_profile', {
+        groupId: activeGroup.id,
+        userId: memberId,
+        role: payload.role,
+        currentTask: payload.currentTask,
+        stage: payload.stage,
+        workload: payload.workload,
+        deadline: payload.deadline || null
+      });
+      await loadBackendState();
+      feedback.textContent = 'Saved.';
+      renderMemberDrivenViews();
+    } catch (error) {
       feedback.textContent = error.message;
       return;
     }
-
-    const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
-    teamMembers = teamMembers.map(item => String(item.id) === String(memberId) ? savedMember : item);
-    feedback.textContent = 'Saved.';
-    renderMemberDrivenViews();
   });
 }
 
