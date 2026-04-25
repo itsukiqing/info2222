@@ -23,7 +23,17 @@ module.exports = async function handler(req, res) {
     const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations&email=eq.${encodeURIComponent(email)}&limit=1`);
     const profile = profiles[0];
 
-    if (!profile || !profile.password_hash || !verifyPassword(password, profile)) {
+    if (!profile) {
+      res.status(401).json({ error: 'Email or password is incorrect.' });
+      return;
+    }
+
+    if (!profile.password_hash || !profile.password_salt) {
+      res.status(400).json({ error: 'This account still uses the old sign-in system. Use Register once with the same email to set a new password.' });
+      return;
+    }
+
+    if (!verifyPassword(password, profile)) {
       res.status(401).json({ error: 'Email or password is incorrect.' });
       return;
     }
