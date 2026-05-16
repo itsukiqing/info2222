@@ -38,7 +38,7 @@ module.exports = async function handler(req, res) {
       supabaseRest(`chat_group_member_availability?select=group_id,user_id,day_name,slots&group_id=${groupFilter}`),
       supabaseRest(`chat_group_calls?select=id,group_id,topic,scheduled_date,scheduled_time,created_by,generated_questions,created_at&group_id=${groupFilter}&order=scheduled_date.desc,scheduled_time.desc`),
       supabaseRest(`chat_group_tasks?select=id,group_id,title,assignee_name,assignee_user_id,priority_rank,duration_days,status,created_by,created_at&group_id=${groupFilter}&order=priority_rank.asc,created_at.desc`),
-      supabaseRest(`chat_group_keys?select=group_id,user_id,encrypted_group_key,encrypted_group_key_iv,key_version&group_id=${groupFilter}&user_id=eq.${currentProfile.id}`)
+      supabaseRest(`chat_group_keys?select=group_id,user_id,encrypted_group_key,encrypted_group_key_iv,key_version&group_id=${groupFilter}&user_id=eq.${currentProfile.id}&order=key_version.asc`)
     ]);
 
     const allUserIds = [...new Set(groupMembers.map(row => row.user_id).filter(Boolean))];
@@ -121,7 +121,12 @@ module.exports = async function handler(req, res) {
       });
       return acc;
     }, {});
-    const groupKeyByGroupId = new Map(groupKeyRows.map(row => [String(row.group_id), row]));
+    const groupKeysByGroupId = groupKeyRows.reduce((acc, row) => {
+      const groupKey = String(row.group_id);
+      if (!acc[groupKey]) acc[groupKey] = [];
+      acc[groupKey].push(row);
+      return acc;
+    }, {});
 
     const stateGroups = groups.map(group => {
       const groupMemberRows = membersByGroup[group.id] || [];
@@ -144,13 +149,11 @@ module.exports = async function handler(req, res) {
             createdAt: message.created_at
           }))
         })),
-        keyEnvelope: groupKeyByGroupId.get(String(group.id))
-          ? {
-              encryptedKey: groupKeyByGroupId.get(String(group.id)).encrypted_group_key,
-              iv: groupKeyByGroupId.get(String(group.id)).encrypted_group_key_iv,
-              version: Number(groupKeyByGroupId.get(String(group.id)).key_version || 1)
-            }
-          : null,
+        keyEnvelopes: (groupKeysByGroupId[String(group.id)] || []).map(row => ({
+          encryptedKey: row.encrypted_group_key,
+          iv: row.encrypted_group_key_iv,
+          version: Number(row.key_version || 1)
+        })),
         members: groupMemberRows.map(membership => {
           const profile = profilesById.get(String(membership.user_id)) || {};
           const memberProfile = memberProfilesByKey.get(`${group.id}:${membership.user_id}`) || {};

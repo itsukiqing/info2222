@@ -89,8 +89,11 @@ create table if not exists public.chat_group_keys (
   encrypted_group_key_iv text not null,
   key_version integer not null default 1,
   created_at timestamptz not null default now(),
-  primary key (group_id, user_id)
+  primary key (group_id, user_id, key_version)
 );
+
+alter table public.chat_group_keys drop constraint if exists chat_group_keys_pkey;
+alter table public.chat_group_keys add primary key (group_id, user_id, key_version);
 
 create table if not exists public.chat_group_member_profiles (
   group_id uuid not null references public.chat_groups(id) on delete cascade,

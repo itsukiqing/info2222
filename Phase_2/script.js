@@ -202,6 +202,7 @@ let activeChatUtility = 'chat';
 const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const groupKeyCacheKey = (groupId, version) => `${String(groupId)}:${Number(version || 1)}`;
 
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
@@ -402,11 +403,17 @@ async function importMemberPublicKey(member) {
   );
 }
 
-function cacheGroupKey(groupId, key) {
-  decryptedGroupKeys.set(String(groupId), key);
+function cacheGroupKey(groupId, version, key) {
+  decryptedGroupKeys.set(groupKeyCacheKey(groupId, version), key);
 }
 
-async function buildGroupKeyEnvelopesForMembers(members) {
+function getLatestGroupKeyVersion(group) {
+  const envelopes = group?.keyEnvelopes || [];
+  if (!envelopes.length) return 1;
+  return envelopes.reduce((maxVersion, envelope) => Math.max(maxVersion, Number(envelope.version || 1)), 1);
+}
+
+async function buildGroupKeyEnvelopesForMembers(members, keyVersion = 1) {
   const groupKey = await crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 },
     true,
@@ -421,20 +428,22 @@ async function buildGroupKeyEnvelopesForMembers(members) {
       userId: member.id,
       encryptedKey: bytesToBase64(wrapped),
       iv: 'rsa-oaep',
-      version: 1
+      version: keyVersion
     };
   }));
-  return { groupKey, keyEnvelopes };
+  return { groupKey, keyVersion, keyEnvelopes };
 }
 
-async function getGroupKey(group) {
+async function getGroupKey(group, requestedVersion = null) {
   const groupId = group?.id || group;
   if (!groupId) throw new Error('No group selected.');
-  const cachedKey = decryptedGroupKeys.get(String(groupId));
+  const groupObject = typeof group === 'object' ? group : getActiveGroup();
+  const version = Number(requestedVersion || getLatestGroupKeyVersion(groupObject) || 1);
+  const cachedKey = decryptedGroupKeys.get(groupKeyCacheKey(groupId, version));
   if (cachedKey) return cachedKey;
-  const envelope = typeof group === 'object' ? group.keyEnvelope : getActiveGroup()?.keyEnvelope;
+  const envelope = (groupObject?.keyEnvelopes || []).find(candidate => Number(candidate.version || 1) === version);
   if (!envelope?.encryptedKey) {
-    throw new Error('This team does not have an encrypted group key yet.');
+    throw new Error(`This team does not have the encrypted group key for version ${version}.`);
   }
   const privateKey = await unlockIdentityKey(currentUser);
   if (!privateKey) {
@@ -452,24 +461,26 @@ async function getGroupKey(group) {
     true,
     ['encrypt', 'decrypt']
   );
-  cacheGroupKey(groupId, groupKey);
+  cacheGroupKey(groupId, version, groupKey);
   return groupKey;
 }
 
 async function createGroupKeyEnvelopeForMember(group, member) {
-  const groupKey = await getGroupKey(group);
+  const version = getLatestGroupKeyVersion(group);
+  const groupKey = await getGroupKey(group, version);
   const rawGroupKey = await crypto.subtle.exportKey('raw', groupKey);
   const publicKey = await importMemberPublicKey(member);
   const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
   return {
     encryptedKey: bytesToBase64(wrapped),
     iv: 'rsa-oaep',
-    version: 1
+    version
   };
 }
 
 async function encryptChatTextForGroup(group, text) {
-  const groupKey = await getGroupKey(group);
+  const version = getLatestGroupKeyVersion(group);
+  const groupKey = await getGroupKey(group, version);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
@@ -479,7 +490,7 @@ async function encryptChatTextForGroup(group, text) {
   return {
     ciphertext: bytesToBase64(ciphertext),
     iv: bytesToBase64(iv),
-    version: 1
+    version
   };
 }
 
@@ -491,7 +502,7 @@ async function decryptChatTextForGroup(group, message) {
   }
   if (!message.ciphertext) return '';
   try {
-    const groupKey = await getGroupKey(group);
+    const groupKey = await getGroupKey(group, message.version);
     const plaintext = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: base64ToBytes(message.iv) },
       groupKey,
@@ -633,7 +644,7 @@ async function mapBackendStateGroup(group) {
     name: group.name,
     createdBy: group.createdBy || null,
     leaderId: group.leaderId || group.createdBy || null,
-    keyEnvelope: group.keyEnvelope || null,
+    keyEnvelopes: Array.isArray(group.keyEnvelopes) ? group.keyEnvelopes : [],
     channels: [],
     members: (group.members || []).map(normalizeTeamMember),
     availability: group.availability || createEmptyMeetingAvailability((group.members || []).map(member => member.full_name || member.name || member.username || member.email)),
@@ -3069,14 +3080,14 @@ function bindGroupModal() {
       };
 
       try {
-        const { groupKey, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers([selfMember, ...selectedMembers]);
+        const { groupKey, keyVersion, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers([selfMember, ...selectedMembers], 1);
         const payload = await performBackendAction('create_group', {
           name,
           topic,
           memberIds: selectedMemberIds,
           keyEnvelopes
         });
-        cacheGroupKey(payload.groupId, groupKey);
+        cacheGroupKey(payload.groupId, keyVersion, groupKey);
         activeGroupId = payload.groupId || null;
         activeChannelId = payload.channelId || null;
       } catch (error) {
@@ -3231,10 +3242,14 @@ function bindMembersDirectory() {
     if (button.dataset.action === 'remove-member') {
       feedback.textContent = 'Removing member...';
       try {
+        const remainingMembers = getActiveTeamMembers().filter(item => String(item.id) !== String(memberId));
+        const { groupKey, keyVersion, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers(remainingMembers, getLatestGroupKeyVersion(activeGroup) + 1);
         await performBackendAction('remove_member', {
           groupId: activeGroup.id,
-          userId: memberId
+          userId: memberId,
+          replacementKeyEnvelopes: keyEnvelopes
         });
+        cacheGroupKey(activeGroup.id, keyVersion, groupKey);
       } catch (error) {
         feedback.textContent = error.message;
         return;

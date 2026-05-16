@@ -152,7 +152,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'remove_member') {
-      const { groupId, userId } = req.body || {};
+      const { groupId, userId, replacementKeyEnvelopes = [] } = req.body || {};
       const groups = await supabaseRest(`chat_groups?select=id,created_by,leader_id&id=eq.${groupId}&limit=1`);
       const group = groups[0];
       if (!group) throw new Error('That group does not exist.');
@@ -168,6 +168,19 @@ module.exports = async function handler(req, res) {
           body: { leader_id: group.created_by }
         });
       }
+      if (!replacementKeyEnvelopes.length) {
+        throw new Error('Rotated encrypted group keys are required when removing a member.');
+      }
+      await Promise.all(replacementKeyEnvelopes.map(envelope => supabaseRest('chat_group_keys', {
+        method: 'POST',
+        body: {
+          group_id: groupId,
+          user_id: envelope.userId,
+          encrypted_group_key: envelope.encryptedKey,
+          encrypted_group_key_iv: envelope.iv,
+          key_version: Number(envelope.version || 1)
+        }
+      })));
       await Promise.all([
         supabaseRest(`chat_group_member_profiles?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' }),
         supabaseRest(`chat_group_member_availability?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' }),
