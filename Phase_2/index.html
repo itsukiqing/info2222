@@ -93,6 +93,7 @@
           <button class="nav-link" data-section="calls">Initialiser</button>
           <button class="nav-link" data-section="checklist">To-Do List</button>
           <button class="nav-link" data-section="catchup">Catch Me Up</button>
+          <button class="nav-link" data-section="security">Security Lab</button>
         </nav>
         <div class="sidebar-footer sidebar-clock-panel">
           <p class="mini-label">Local time</p>
@@ -362,6 +363,43 @@
               <span class="badge">Mock AI logic</span>
             </div>
             <div id="recentHighlights" class="insight-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="security" class="section">
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Message interception demo</h3>
+              <span class="badge" id="securityEncryptionBadge">Secure mode</span>
+            </div>
+            <p class="muted">Temporarily disable chat encryption for the next message, then inspect the raw database fields for the latest group message.</p>
+            <div class="stack-form">
+              <button type="button" class="danger-btn" id="toggleInsecureChatBtn">Disable E2EE for next message</button>
+              <button type="button" class="secondary-btn" id="inspectLatestMessageBtn">Inspect latest message record</button>
+            </div>
+            <p id="securityMessageFeedback" class="feedback-text" role="status"></p>
+            <pre id="latestMessagePayload" class="security-output">No message inspected yet.</pre>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Brute-force / no rate limiting demo</h3>
+              <span class="badge">Attack simulation</span>
+            </div>
+            <p class="muted">Run repeated incorrect sign-in attempts against the login endpoint and check whether the server slows or blocks them.</p>
+            <form id="securityAttackForm" class="stack-form">
+              <label class="stack-label">Target email
+                <input id="securityAttackEmail" type="email" placeholder="student@example.com" />
+              </label>
+              <label class="stack-label">Attempt count
+                <input id="securityAttackCount" type="number" min="3" max="20" value="5" />
+              </label>
+              <button type="submit" class="primary-btn">Run failed sign-in burst</button>
+            </form>
+            <p id="securityAttackFeedback" class="feedback-text" role="status"></p>
+            <div id="securityAttackResults" class="security-output security-results">No attack run yet.</div>
           </div>
         </div>
       </section>

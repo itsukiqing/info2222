@@ -199,6 +199,9 @@ let checklistStatusFilter = null;
 let checklistFilterMenuOpen = false;
 let meetingEditMode = false;
 let activeChatUtility = 'chat';
+let securityDemoDisableEncryptionForNextMessage = false;
+let securityLatestMessagePayload = 'No message inspected yet.';
+let securityAttackSummary = 'No attack run yet.';
 const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -212,7 +215,8 @@ const sectionsMeta = {
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
   calls: ['Initialiser', 'Initialise calls, reminders, and calendar-based meeting setup.'],
   checklist: ['To-Do List', 'Priority, duration, status, sort, and filter.'],
-  catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.']
+  catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.'],
+  security: ['Security Lab', 'Controlled demonstrations of vulnerabilities caused by missing or misconfigured security measures.']
 };
 
 const timeSlots = ['9-10', '10-11', '11-12', '12-1', '1-2', '2-3', '3-4', '4-5'];
@@ -537,6 +541,7 @@ async function init() {
   bindTasks();
   bindChecklistControls();
   bindCatchup();
+  bindSecurityLab();
   bindGroupModal();
   bindAddMemberModal();
   bindMembersDirectory();
@@ -552,6 +557,7 @@ function renderAll() {
   renderCalls();
   renderTasks();
   renderCatchupHighlights();
+  renderSecurityLab();
 }
 
 function navigateToSection(section) {
@@ -2183,14 +2189,22 @@ function bindChat() {
       }
 
       try {
-        const encryptedPayload = await encryptChatTextForGroup(activeGroup, text);
+        const encryptedPayload = securityDemoDisableEncryptionForNextMessage
+          ? null
+          : await encryptChatTextForGroup(activeGroup, text);
         await performBackendAction('send_message', {
           groupId: activeGroup.id,
           channelId: activeChannel.id,
-          ciphertext: encryptedPayload.ciphertext,
-          iv: encryptedPayload.iv,
-          version: encryptedPayload.version
+          ciphertext: encryptedPayload?.ciphertext || '',
+          iv: encryptedPayload?.iv || '',
+          version: encryptedPayload?.version || 0,
+          plaintextBody: securityDemoDisableEncryptionForNextMessage ? text : ''
         });
+        if (securityDemoDisableEncryptionForNextMessage) {
+          securityDemoDisableEncryptionForNextMessage = false;
+          $('#securityMessageFeedback').textContent = 'One plaintext message was sent for the interception demo. Secure chat is back on.';
+          renderSecurityLab();
+        }
       } catch (error) {
         chatLoadError = error.message;
         renderChat();
@@ -3052,6 +3066,113 @@ function renderCatchupHighlights() {
     <div class="insight-item"><strong>Meeting note:</strong> ${highlightedCall ? `${escapeHtml(highlightedCall.title)} is scheduled for ${formatShortDate(highlightedCall.date)} at ${formatTime(highlightedCall.time)}.` : 'No team calls have been scheduled yet.'}</div>
     <div class="insight-item"><strong>Reminder logic:</strong> ${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length} message${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length === 1 ? '' : 's'} currently mention someone in this group.</div>
   `;
+}
+
+function renderSecurityLab() {
+  const activeGroup = getActiveGroup();
+  const encryptionBadge = $('#securityEncryptionBadge');
+  const toggleBtn = $('#toggleInsecureChatBtn');
+  const inspectBtn = $('#inspectLatestMessageBtn');
+  const attackEmail = $('#securityAttackEmail');
+
+  if (attackEmail && !attackEmail.value && currentUser?.email) {
+    attackEmail.value = currentUser.email;
+  }
+
+  if (securityDemoDisableEncryptionForNextMessage) {
+    encryptionBadge.textContent = 'Next message insecure';
+    toggleBtn.textContent = 'Re-enable secure chat';
+    toggleBtn.classList.remove('danger-btn');
+    toggleBtn.classList.add('secondary-btn');
+  } else {
+    encryptionBadge.textContent = 'Secure mode';
+    toggleBtn.textContent = 'Disable E2EE for next message';
+    toggleBtn.classList.add('danger-btn');
+    toggleBtn.classList.remove('secondary-btn');
+  }
+
+  toggleBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
+  inspectBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
+  $('#latestMessagePayload').textContent = securityLatestMessagePayload;
+  $('#securityAttackResults').textContent = securityAttackSummary;
+}
+
+function bindSecurityLab() {
+  $('#toggleInsecureChatBtn').addEventListener('click', () => {
+    if (!supabaseClient || !currentUser || !getActiveGroup()) {
+      $('#securityMessageFeedback').textContent = 'Select a real group before running the interception demo.';
+      return;
+    }
+    securityDemoDisableEncryptionForNextMessage = !securityDemoDisableEncryptionForNextMessage;
+    $('#securityMessageFeedback').textContent = securityDemoDisableEncryptionForNextMessage
+      ? 'The next message you send in this group will be stored in plaintext for the demo.'
+      : 'Secure chat has been restored for the next message.';
+    renderSecurityLab();
+  });
+
+  $('#inspectLatestMessageBtn').addEventListener('click', async () => {
+    const activeGroup = getActiveGroup();
+    if (!supabaseClient || !currentUser || !activeGroup) {
+      $('#securityMessageFeedback').textContent = 'Select a real group before inspecting messages.';
+      return;
+    }
+    $('#securityMessageFeedback').textContent = 'Inspecting the latest stored message...';
+    try {
+      const payload = await performBackendAction('peek_latest_message', { groupId: activeGroup.id });
+      securityLatestMessagePayload = JSON.stringify(payload.message || {}, null, 2);
+      $('#securityMessageFeedback').textContent = 'Latest message record loaded from the database.';
+    } catch (error) {
+      $('#securityMessageFeedback').textContent = error.message || 'Could not inspect the latest message.';
+    }
+    renderSecurityLab();
+  });
+
+  $('#securityAttackForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('#securityAttackEmail').value.trim().toLowerCase();
+    const count = Math.max(3, Math.min(20, Number($('#securityAttackCount').value || 5)));
+    if (!email) {
+      $('#securityAttackFeedback').textContent = 'Enter an email address to target.';
+      return;
+    }
+    if (!isBrowserSecureForCredentials()) {
+      $('#securityAttackFeedback').textContent = getSecureTransportWarning();
+      return;
+    }
+
+    $('#securityAttackFeedback').textContent = 'Running failed sign-in burst...';
+    const startedAt = performance.now();
+    const results = [];
+    for (let index = 0; index < count; index += 1) {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          email,
+          password: `wrong-password-${index + 1}`
+        })
+      });
+      results.push(response.status);
+    }
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    const blockedAttempts = results.filter(status => status === 429).length;
+    const failedAttempts = results.filter(status => status === 401).length;
+    securityAttackSummary = [
+      `Target: ${email}`,
+      `Attempts sent: ${count}`,
+      `HTTP 401 responses: ${failedAttempts}`,
+      `HTTP 429 responses: ${blockedAttempts}`,
+      `Elapsed time: ${elapsedMs} ms`,
+      blockedAttempts
+        ? 'A rate limit blocked some requests.'
+        : 'No request was rate-limited. This demonstrates a brute-force / no-rate-limiting weakness.'
+    ].join('\n');
+    $('#securityAttackFeedback').textContent = blockedAttempts
+      ? 'The server blocked some attempts.'
+      : 'Every bad guess was processed. This is the vulnerability to record.';
+    renderSecurityLab();
+  });
 }
 
 function bindGroupModal() {

@@ -32,9 +32,10 @@ module.exports = async function handler(req, res) {
 
   try {
     if (action === 'send_message') {
-      const { groupId, channelId, ciphertext, iv, version = 1 } = req.body || {};
+      const { groupId, channelId, ciphertext, iv, version = 1, plaintextBody = '' } = req.body || {};
       await getGroupForUser(groupId, currentProfile.id);
-      if (!ciphertext || !iv) {
+      const insecurePlaintextDemo = Boolean(plaintextBody);
+      if (!insecurePlaintextDemo && (!ciphertext || !iv)) {
         throw new Error('Encrypted chat payload is required.');
       }
       await supabaseRest('chat_messages', {
@@ -44,13 +45,21 @@ module.exports = async function handler(req, res) {
           channel_id: channelId,
           sender_id: currentProfile.id,
           sender_name: currentProfile.full_name || currentProfile.username || currentProfile.email,
-          body: null,
-          body_ciphertext: ciphertext,
-          body_iv: iv,
-          body_version: version
+          body: insecurePlaintextDemo ? plaintextBody : null,
+          body_ciphertext: insecurePlaintextDemo ? null : ciphertext,
+          body_iv: insecurePlaintextDemo ? null : iv,
+          body_version: insecurePlaintextDemo ? 0 : version
         }
       });
       res.status(200).json({ ok: true });
+      return;
+    }
+
+    if (action === 'peek_latest_message') {
+      const { groupId } = req.body || {};
+      await getGroupForUser(groupId, currentProfile.id);
+      const rows = await supabaseRest(`chat_messages?select=id,group_id,channel_id,sender_id,sender_name,body,body_ciphertext,body_iv,body_version,created_at&group_id=eq.${groupId}&order=created_at.desc&limit=1`);
+      res.status(200).json({ message: rows[0] || null });
       return;
     }
 
