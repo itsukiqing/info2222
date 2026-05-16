@@ -5,6 +5,47 @@ const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 14;
 const PBKDF2_ITERATIONS = 310000;
 const PBKDF2_KEYLEN = 32;
 const PBKDF2_DIGEST = 'sha256';
+const PRIVATE_KEY_ITERATIONS = 310000;
+
+function isLocalHost(hostname) {
+  return ['localhost', '127.0.0.1', '::1'].includes(String(hostname || '').split(':')[0]);
+}
+
+function getRequestHost(req) {
+  return String(req.headers['x-forwarded-host'] || req.headers.host || '');
+}
+
+function getForwardedProto(req) {
+  return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+}
+
+function isSecureRequest(req) {
+  const forwardedProto = getForwardedProto(req);
+  if (forwardedProto) return forwardedProto === 'https';
+  if (req.socket?.encrypted) return true;
+  return false;
+}
+
+function applySecurityHeaders(req, res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
+  if (isSecureRequest(req)) {
+    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  }
+}
+
+function requireSecureRequest(req, res) {
+  applySecurityHeaders(req, res);
+  if (isSecureRequest(req) || isLocalHost(getRequestHost(req))) {
+    return true;
+  }
+  res.status(426).json({ error: 'Secure HTTPS transport is required for this action.' });
+  return false;
+}
 
 function getEnv(name) {
   const value = process.env[name];
@@ -101,7 +142,7 @@ function hashSessionToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-async function createSession(res, userId) {
+async function createSession(req, res, userId) {
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = hashSessionToken(rawToken);
   const expiresAt = new Date(Date.now() + SESSION_DURATION_MS).toISOString();
@@ -115,7 +156,17 @@ async function createSession(res, userId) {
     }
   });
 
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_DURATION_MS / 1000)}`);
+  const cookieParts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${Math.floor(SESSION_DURATION_MS / 1000)}`
+  ];
+  if (isSecureRequest(req)) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
 
 async function clearSession(req, res) {
@@ -128,17 +179,39 @@ async function clearSession(req, res) {
       prefer: 'return=minimal'
     }).catch(() => {});
   }
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  const cookieParts = [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'HttpOnly', 'SameSite=Strict', 'Max-Age=0'];
+  if (isSecureRequest(req)) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
 
-function formatUser(profile) {
+function formatCryptoMaterial(profile) {
+  if (!profile?.public_key_jwk || !profile?.encrypted_private_key || !profile?.private_key_iv || !profile?.private_key_salt) {
+    return null;
+  }
+
   return {
+    publicKeyJwk: profile.public_key_jwk,
+    encryptedPrivateKey: profile.encrypted_private_key,
+    privateKeyIv: profile.private_key_iv,
+    privateKeySalt: profile.private_key_salt,
+    privateKeyIterations: Number(profile.private_key_iterations || PRIVATE_KEY_ITERATIONS)
+  };
+}
+
+function formatUser(profile, options = {}) {
+  const user = {
     id: profile.id,
     username: profile.username || '',
     name: profile.full_name || profile.username || profile.email || 'Student',
     email: profile.email || '',
     role: profile.role || 'Team member'
   };
+  if (options.includeCrypto) {
+    user.crypto = formatCryptoMaterial(profile);
+  }
+  return user;
 }
 
 async function getSessionProfile(req) {
@@ -154,7 +227,7 @@ async function getSessionProfile(req) {
     return null;
   }
 
-  const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations&id=eq.${session.user_id}&limit=1`);
+  const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${session.user_id}&limit=1`);
   return profiles[0] || null;
 }
 
@@ -186,14 +259,18 @@ async function ensureShadowAuthUser({ email, fullName, username }) {
 
 module.exports = {
   SESSION_COOKIE_NAME,
+  PRIVATE_KEY_ITERATIONS,
   createPasswordRecord,
   verifyPassword,
   supabaseRest,
   supabaseAuthAdmin,
+  applySecurityHeaders,
+  requireSecureRequest,
   createSession,
   clearSession,
   getSessionProfile,
   requireSessionProfile,
   ensureShadowAuthUser,
+  formatCryptoMaterial,
   formatUser
 };

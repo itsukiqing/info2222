@@ -130,6 +130,7 @@ const appData = {
 
 const AUTH_STORAGE_KEY = 'unigroupHubCurrentUser';
 const DEMO_USERS_STORAGE_KEY = 'unigroupHubDemoUsers';
+const PRIVATE_KEY_SESSION_STORAGE_KEY = 'unigroupHubPrivateKeyJwk';
 const SUPABASE_PLACEHOLDER_URL = 'https://YOUR_PROJECT_ID.supabase.co';
 const SUPABASE_PLACEHOLDER_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SUPABASE_AUTH_TIMEOUT_MS = 12000;
@@ -152,6 +153,8 @@ let activeSection = 'dashboard';
 let activeGroupId = 1;
 let activeChannelId = 'general';
 let currentUser = null;
+let unlockedPrivateKey = null;
+const decryptedGroupKeys = new Map();
 let supabaseClient = null;
 let authMode = 'demo';
 let authFormMode = 'login';
@@ -197,6 +200,8 @@ let checklistFilterMenuOpen = false;
 let meetingEditMode = false;
 let activeChatUtility = 'chat';
 const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
@@ -234,6 +239,252 @@ async function apiRequest(path, options = {}) {
     throw new Error(payload?.error || 'Request failed.');
   }
   return payload;
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  array.forEach(byte => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ''));
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function parseStoredJwk(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function cachePrivateKeyJwk(jwk) {
+  sessionStorage.setItem(PRIVATE_KEY_SESSION_STORAGE_KEY, JSON.stringify(jwk));
+}
+
+async function importCachedPrivateKey() {
+  const stored = sessionStorage.getItem(PRIVATE_KEY_SESSION_STORAGE_KEY);
+  const jwk = parseStoredJwk(stored);
+  if (!jwk) return null;
+  return crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt']
+  );
+}
+
+function clearClientCryptoState() {
+  unlockedPrivateKey = null;
+  decryptedGroupKeys.clear();
+  sessionStorage.removeItem(PRIVATE_KEY_SESSION_STORAGE_KEY);
+}
+
+async function deriveWrappingKey(password, saltBase64, iterations) {
+  const passwordKey = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: base64ToBytes(saltBase64),
+      iterations: Number(iterations || 310000),
+      hash: 'SHA-256'
+    },
+    passwordKey,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function createIdentityKeyMaterial(password) {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSA-OAEP',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256'
+    },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  const privateKeyPkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrappingKey = await deriveWrappingKey(password, bytesToBase64(salt), 310000);
+  const encryptedPrivateKey = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    wrappingKey,
+    privateKeyPkcs8
+  );
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  cachePrivateKeyJwk(privateKeyJwk);
+  unlockedPrivateKey = keyPair.privateKey;
+  return {
+    publicKeyJwk,
+    encryptedPrivateKey: bytesToBase64(encryptedPrivateKey),
+    privateKeyIv: bytesToBase64(iv),
+    privateKeySalt: bytesToBase64(salt),
+    privateKeyIterations: 310000
+  };
+}
+
+async function unlockIdentityKey(user, password = '') {
+  if (!user?.crypto) return null;
+  if (unlockedPrivateKey) return unlockedPrivateKey;
+
+  const cachedKey = await importCachedPrivateKey();
+  if (cachedKey) {
+    unlockedPrivateKey = cachedKey;
+    return unlockedPrivateKey;
+  }
+
+  if (!password) {
+    throw new Error('Your encrypted message key is locked. Please sign in again.');
+  }
+
+  const wrappingKey = await deriveWrappingKey(password, user.crypto.privateKeySalt, user.crypto.privateKeyIterations);
+  const decryptedPkcs8 = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(user.crypto.privateKeyIv) },
+    wrappingKey,
+    base64ToBytes(user.crypto.encryptedPrivateKey)
+  );
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    decryptedPkcs8,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt']
+  );
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', privateKey);
+  cachePrivateKeyJwk(privateKeyJwk);
+  unlockedPrivateKey = privateKey;
+  return privateKey;
+}
+
+async function importMemberPublicKey(member) {
+  const jwk = parseStoredJwk(member?.publicKeyJwk || member?.public_key_jwk || member?.crypto?.publicKeyJwk);
+  if (!jwk) {
+    throw new Error(`Missing public key for ${member?.full_name || member?.name || member?.email || 'that member'}.`);
+  }
+  return crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['encrypt']
+  );
+}
+
+function cacheGroupKey(groupId, key) {
+  decryptedGroupKeys.set(String(groupId), key);
+}
+
+async function buildGroupKeyEnvelopesForMembers(members) {
+  const groupKey = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  const rawGroupKey = await crypto.subtle.exportKey('raw', groupKey);
+  const uniqueMembers = [...new Map(members.map(member => [String(member.id), member])).values()];
+  const keyEnvelopes = await Promise.all(uniqueMembers.map(async member => {
+    const publicKey = await importMemberPublicKey(member);
+    const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
+    return {
+      userId: member.id,
+      encryptedKey: bytesToBase64(wrapped),
+      iv: 'rsa-oaep',
+      version: 1
+    };
+  }));
+  return { groupKey, keyEnvelopes };
+}
+
+async function getGroupKey(group) {
+  const groupId = group?.id || group;
+  if (!groupId) throw new Error('No group selected.');
+  const cachedKey = decryptedGroupKeys.get(String(groupId));
+  if (cachedKey) return cachedKey;
+  const envelope = typeof group === 'object' ? group.keyEnvelope : getActiveGroup()?.keyEnvelope;
+  if (!envelope?.encryptedKey) {
+    throw new Error('This team does not have an encrypted group key yet.');
+  }
+  const privateKey = await unlockIdentityKey(currentUser);
+  if (!privateKey) {
+    throw new Error('Your encrypted message key is unavailable.');
+  }
+  const rawGroupKey = await crypto.subtle.decrypt(
+    { name: 'RSA-OAEP' },
+    privateKey,
+    base64ToBytes(envelope.encryptedKey)
+  );
+  const groupKey = await crypto.subtle.importKey(
+    'raw',
+    rawGroupKey,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  cacheGroupKey(groupId, groupKey);
+  return groupKey;
+}
+
+async function createGroupKeyEnvelopeForMember(group, member) {
+  const groupKey = await getGroupKey(group);
+  const rawGroupKey = await crypto.subtle.exportKey('raw', groupKey);
+  const publicKey = await importMemberPublicKey(member);
+  const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
+  return {
+    encryptedKey: bytesToBase64(wrapped),
+    iv: 'rsa-oaep',
+    version: 1
+  };
+}
+
+async function encryptChatTextForGroup(group, text) {
+  const groupKey = await getGroupKey(group);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    groupKey,
+    textEncoder.encode(text)
+  );
+  return {
+    ciphertext: bytesToBase64(ciphertext),
+    iv: bytesToBase64(iv),
+    version: 1
+  };
+}
+
+async function decryptChatTextForGroup(group, message) {
+  if (message.text && !message.ciphertext) return message.text;
+  if (!message.ciphertext) return '';
+  try {
+    const groupKey = await getGroupKey(group);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(message.iv) },
+      groupKey,
+      base64ToBytes(message.ciphertext)
+    );
+    return textDecoder.decode(plaintext);
+  } catch (error) {
+    return '[Encrypted message unavailable]';
+  }
 }
 
 async function performBackendAction(action, payload = {}) {
@@ -336,6 +587,7 @@ function bindAuth() {
 
     currentUser = null;
     localStorage.removeItem(AUTH_STORAGE_KEY);
+    clearClientCryptoState();
     teardownDatabaseChat();
     teamMembers = [];
     teamMembersError = '';
@@ -354,30 +606,38 @@ function bindAuth() {
   });
 }
 
-function mapBackendStateGroup(group) {
-  return {
+async function mapBackendStateGroup(group) {
+  const mappedGroup = {
     id: group.id,
     name: group.name,
     createdBy: group.createdBy || null,
     leaderId: group.leaderId || group.createdBy || null,
-    channels: (group.channels || []).map(channel => ({
-      id: channel.id,
-      name: channel.name,
-      messages: (channel.messages || []).map(message => ({
-        id: message.id,
-        senderId: message.senderId || null,
-        sender: message.sender || 'Unknown',
-        text: message.text || '',
-        time: message.time || formatChatTimestamp(message.createdAt),
-        date: message.date || (message.createdAt || '').slice(0, 10),
-        createdAt: message.createdAt || ''
-      }))
-    })),
+    keyEnvelope: group.keyEnvelope || null,
+    channels: [],
     members: (group.members || []).map(normalizeTeamMember),
     availability: group.availability || createEmptyMeetingAvailability((group.members || []).map(member => member.full_name || member.name || member.username || member.email)),
     calls: (group.calls || []).map(normalizeCallRecord),
     tasks: (group.tasks || []).map(normalizeTaskRecord)
   };
+
+  mappedGroup.channels = await Promise.all((group.channels || []).map(async channel => ({
+    id: channel.id,
+    name: channel.name,
+    messages: await Promise.all((channel.messages || []).map(async message => ({
+      id: message.id,
+      senderId: message.senderId || null,
+      sender: message.sender || 'Unknown',
+      ciphertext: message.ciphertext || '',
+      iv: message.iv || '',
+      version: Number(message.version || 1),
+      text: await decryptChatTextForGroup(mappedGroup, message),
+      time: message.time || formatChatTimestamp(message.createdAt),
+      date: message.date || (message.createdAt || '').slice(0, 10),
+      createdAt: message.createdAt || ''
+    })))
+  })));
+
+  return mappedGroup;
 }
 
 function syncDerivedStateFromActiveGroup() {
@@ -424,8 +684,11 @@ async function loadBackendState() {
   try {
     const payload = await apiRequest('/api/app-state');
     currentUser = payload.user || currentUser;
-    availableChatMembers = payload.memberDirectory || [];
-    appData.groups = (payload.groups || []).map(mapBackendStateGroup);
+    availableChatMembers = (payload.memberDirectory || []).map(member => ({
+      ...member,
+      publicKeyJwk: member.public_key_jwk || member.publicKeyJwk || null
+    }));
+    appData.groups = await Promise.all((payload.groups || []).map(mapBackendStateGroup));
     ensureActiveChatSelection();
     syncDerivedStateFromActiveGroup();
     renderGroupMemberPicker();
@@ -467,6 +730,7 @@ async function signInWithSupabase(email, password) {
       'Sign in timed out. Check your internet connection and backend settings.'
     );
     currentUser = payload.user || null;
+    await unlockIdentityKey(currentUser, password);
     $('#loginForm').reset();
     $('#loginFeedback').textContent = '';
     await loadBackendState();
@@ -501,13 +765,19 @@ async function registerUser(email, password) {
 async function registerWithSupabase(email, password, username, fullName) {
   $('#loginFeedback').textContent = 'Creating account...';
   try {
+    const keyMaterial = await createIdentityKeyMaterial(password);
     const payload = await apiRequest('/api/auth/register', {
       method: 'POST',
       body: {
         email,
         password,
         username,
-        fullName
+        fullName,
+        publicKeyJwk: keyMaterial.publicKeyJwk,
+        encryptedPrivateKey: keyMaterial.encryptedPrivateKey,
+        privateKeyIv: keyMaterial.privateKeyIv,
+        privateKeySalt: keyMaterial.privateKeySalt,
+        privateKeyIterations: keyMaterial.privateKeyIterations
       }
     });
     currentUser = payload.user || null;
@@ -568,8 +838,13 @@ async function restoreSession() {
     try {
       const payload = await apiRequest('/api/auth/me');
       currentUser = payload.user || null;
-      if (currentUser) await loadBackendState();
+      if (currentUser) {
+        await unlockIdentityKey(currentUser);
+        await loadBackendState();
+      }
     } catch (error) {
+      await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+      clearClientCryptoState();
       currentUser = null;
     }
     return;
@@ -625,7 +900,7 @@ function syncAuthHint() {
   if (authMode === 'custom') {
     hint.innerHTML = `
       <strong>Custom auth</strong>
-      <span>Passwords are stored with PBKDF2 + salt in your database, and the app signs in through server-side sessions.</span>
+      <span>Passwords are stored with PBKDF2 + salt, sessions are server-side, and group messages are end-to-end encrypted in the browser.</span>
     `;
     return;
   }
@@ -707,6 +982,7 @@ function normalizeTeamMember(member) {
     username: member.username || '',
     name,
     email: member.email || '',
+    publicKeyJwk: member.public_key_jwk || member.publicKeyJwk || null,
     role: member.role || 'Team member',
     currentTask: member.current_task || member.currentTask || '',
     stage: member.stage || 'Not set',
@@ -1868,10 +2144,13 @@ function bindChat() {
       }
 
       try {
+        const encryptedPayload = await encryptChatTextForGroup(activeGroup, text);
         await performBackendAction('send_message', {
           groupId: activeGroup.id,
           channelId: activeChannel.id,
-          body: text
+          ciphertext: encryptedPayload.ciphertext,
+          iv: encryptedPayload.iv,
+          version: encryptedPayload.version
         });
       } catch (error) {
         chatLoadError = error.message;
@@ -2752,16 +3031,24 @@ function bindGroupModal() {
     const topic = $('#groupTopicInput').value.trim() || 'General';
 
     if (supabaseClient && currentUser) {
-      const selectedMemberIds = [
-        ...$all('.group-member-checkbox:checked').map(input => input.value)
-      ].filter(Boolean);
+      const selectedMemberIds = [...$all('.group-member-checkbox:checked').map(input => input.value)].filter(Boolean);
+      const selectedMembers = availableChatMembers.filter(member => selectedMemberIds.includes(String(member.id)));
+      const selfMember = {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        publicKeyJwk: currentUser.crypto?.publicKeyJwk || null
+      };
 
       try {
+        const { groupKey, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers([selfMember, ...selectedMembers]);
         const payload = await performBackendAction('create_group', {
           name,
           topic,
-          memberIds: selectedMemberIds
+          memberIds: selectedMemberIds,
+          keyEnvelopes
         });
+        cacheGroupKey(payload.groupId, groupKey);
         activeGroupId = payload.groupId || null;
         activeChannelId = payload.channelId || null;
       } catch (error) {
@@ -2841,9 +3128,17 @@ function bindAddMemberModal() {
     }
 
     try {
+      const targetMember = availableChatMembers.find(member => String(member.email || '').toLowerCase() === email);
+      if (!targetMember) {
+        throw new Error('No user found with that email.');
+      }
+      const activeGroupKeyEnvelope = await createGroupKeyEnvelopeForMember(activeGroup, targetMember);
       const addedMember = await performBackendAction('add_member_by_email', {
         groupId: activeGroup.id,
-        email
+        email,
+        encryptedGroupKey: activeGroupKeyEnvelope.encryptedKey,
+        encryptedGroupKeyIv: activeGroupKeyEnvelope.iv,
+        keyVersion: activeGroupKeyEnvelope.version
       });
       $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
     } catch (error) {

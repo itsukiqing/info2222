@@ -8,6 +8,11 @@ create table if not exists public.profiles (
   password_salt text,
   password_iterations integer,
   password_algorithm text default 'pbkdf2-sha256',
+  public_key_jwk jsonb,
+  encrypted_private_key text,
+  private_key_iv text,
+  private_key_salt text,
+  private_key_iterations integer,
   created_at timestamptz default now()
 );
 
@@ -15,6 +20,11 @@ alter table public.profiles add column if not exists password_hash text;
 alter table public.profiles add column if not exists password_salt text;
 alter table public.profiles add column if not exists password_iterations integer;
 alter table public.profiles add column if not exists password_algorithm text default 'pbkdf2-sha256';
+alter table public.profiles add column if not exists public_key_jwk jsonb;
+alter table public.profiles add column if not exists encrypted_private_key text;
+alter table public.profiles add column if not exists private_key_iv text;
+alter table public.profiles add column if not exists private_key_salt text;
+alter table public.profiles add column if not exists private_key_iterations integer;
 
 create table if not exists public.app_sessions (
   id uuid primary key default gen_random_uuid(),
@@ -61,7 +71,25 @@ create table if not exists public.chat_messages (
   sender_id uuid not null references auth.users(id) on delete cascade,
   sender_name text not null,
   body text not null,
+  body_ciphertext text,
+  body_iv text,
+  body_version integer default 1,
   created_at timestamptz not null default now()
+);
+
+alter table public.chat_messages alter column body drop not null;
+alter table public.chat_messages add column if not exists body_ciphertext text;
+alter table public.chat_messages add column if not exists body_iv text;
+alter table public.chat_messages add column if not exists body_version integer default 1;
+
+create table if not exists public.chat_group_keys (
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  encrypted_group_key text not null,
+  encrypted_group_key_iv text not null,
+  key_version integer not null default 1,
+  created_at timestamptz not null default now(),
+  primary key (group_id, user_id)
 );
 
 create table if not exists public.chat_group_member_profiles (

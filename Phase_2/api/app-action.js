@@ -1,4 +1,4 @@
-const { requireSessionProfile, supabaseRest } = require('./_lib/custom-auth');
+const { requireSecureRequest, requireSessionProfile, supabaseRest } = require('./_lib/custom-auth');
 
 async function getGroupForUser(groupId, userId) {
   const groups = await supabaseRest(`chat_groups?select=id,name,created_by,leader_id&id=eq.${groupId}&limit=1`);
@@ -23,6 +23,7 @@ module.exports = async function handler(req, res) {
     res.status(405).json({ error: 'Method not allowed.' });
     return;
   }
+  if (!requireSecureRequest(req, res)) return;
 
   const currentProfile = await requireSessionProfile(req, res);
   if (!currentProfile) return;
@@ -31,8 +32,11 @@ module.exports = async function handler(req, res) {
 
   try {
     if (action === 'send_message') {
-      const { groupId, channelId, body } = req.body || {};
+      const { groupId, channelId, ciphertext, iv, version = 1 } = req.body || {};
       await getGroupForUser(groupId, currentProfile.id);
+      if (!ciphertext || !iv) {
+        throw new Error('Encrypted chat payload is required.');
+      }
       await supabaseRest('chat_messages', {
         method: 'POST',
         body: {
@@ -40,7 +44,10 @@ module.exports = async function handler(req, res) {
           channel_id: channelId,
           sender_id: currentProfile.id,
           sender_name: currentProfile.full_name || currentProfile.username || currentProfile.email,
-          body
+          body: null,
+          body_ciphertext: ciphertext,
+          body_iv: iv,
+          body_version: version
         }
       });
       res.status(200).json({ ok: true });
@@ -48,7 +55,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'create_group') {
-      const { name, topic, memberIds = [] } = req.body || {};
+      const { name, topic, memberIds = [], keyEnvelopes = [] } = req.body || {};
       const createdGroups = await supabaseRest('chat_groups', {
         method: 'POST',
         body: {
@@ -60,6 +67,9 @@ module.exports = async function handler(req, res) {
       const group = createdGroups[0];
 
       const allMemberIds = [...new Set([currentProfile.id, ...memberIds].filter(Boolean))];
+      if (!keyEnvelopes.length) {
+        throw new Error('Encrypted group keys are required to create a secure group.');
+      }
       await Promise.all(allMemberIds.map(userId => supabaseRest('chat_group_members', {
         method: 'POST',
         body: {
@@ -68,6 +78,17 @@ module.exports = async function handler(req, res) {
           added_by: currentProfile.id
         },
         prefer: 'resolution=ignore-duplicates,return=minimal'
+      })));
+      await Promise.all(keyEnvelopes.map(envelope => supabaseRest('chat_group_keys', {
+        method: 'POST',
+        body: {
+          group_id: group.id,
+          user_id: envelope.userId,
+          encrypted_group_key: envelope.encryptedKey,
+          encrypted_group_key_iv: envelope.iv,
+          key_version: Number(envelope.version || 1)
+        },
+        prefer: 'resolution=merge-duplicates,return=minimal'
       })));
 
       const createdChannels = await supabaseRest('chat_channels', {
@@ -78,22 +99,12 @@ module.exports = async function handler(req, res) {
         }
       });
       const channel = createdChannels[0];
-      await supabaseRest('chat_messages', {
-        method: 'POST',
-        body: {
-          group_id: group.id,
-          channel_id: channel.id,
-          sender_id: currentProfile.id,
-          sender_name: 'System',
-          body: `Welcome to ${name}.`
-        }
-      });
       res.status(200).json({ groupId: group.id, channelId: channel.id });
       return;
     }
 
     if (action === 'add_member_by_email') {
-      const { groupId, email } = req.body || {};
+      const { groupId, email, encryptedGroupKey, encryptedGroupKeyIv, keyVersion = 1 } = req.body || {};
       if (!(await canManageGroup(groupId, currentProfile.id))) {
         throw new Error('Only the team leader or creator can add members.');
       }
@@ -108,6 +119,20 @@ module.exports = async function handler(req, res) {
           added_by: currentProfile.id
         },
         prefer: 'resolution=ignore-duplicates,return=minimal'
+      });
+      if (!encryptedGroupKey || !encryptedGroupKeyIv) {
+        throw new Error('The new member must receive the encrypted group key.');
+      }
+      await supabaseRest('chat_group_keys', {
+        method: 'POST',
+        body: {
+          group_id: groupId,
+          user_id: target.id,
+          encrypted_group_key: encryptedGroupKey,
+          encrypted_group_key_iv: encryptedGroupKeyIv,
+          key_version: Number(keyVersion || 1)
+        },
+        prefer: 'resolution=merge-duplicates,return=minimal'
       });
       res.status(200).json({ added_email: target.email, added_full_name: target.full_name || target.email, added_user_id: target.id });
       return;
@@ -146,6 +171,7 @@ module.exports = async function handler(req, res) {
       await Promise.all([
         supabaseRest(`chat_group_member_profiles?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' }),
         supabaseRest(`chat_group_member_availability?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' }),
+        supabaseRest(`chat_group_keys?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' }),
         supabaseRest(`chat_group_members?group_id=eq.${groupId}&user_id=eq.${userId}`, { method: 'DELETE', prefer: 'return=minimal' })
       ]);
       res.status(200).json({ ok: true });

@@ -1,4 +1,4 @@
-const { formatUser, requireSessionProfile, supabaseRest } = require('./_lib/custom-auth');
+const { formatUser, requireSecureRequest, requireSessionProfile, supabaseRest } = require('./_lib/custom-auth');
 
 function inFilter(values) {
   return `in.(${values.join(',')})`;
@@ -9,18 +9,19 @@ module.exports = async function handler(req, res) {
     res.status(405).json({ error: 'Method not allowed.' });
     return;
   }
+  if (!requireSecureRequest(req, res)) return;
 
   const currentProfile = await requireSessionProfile(req, res);
   if (!currentProfile) return;
 
   try {
-    const memberDirectory = await supabaseRest('profiles?select=id,username,email,full_name,role&order=full_name.asc');
+    const memberDirectory = await supabaseRest('profiles?select=id,username,email,full_name,role,public_key_jwk&order=full_name.asc');
     const memberships = await supabaseRest(`chat_group_members?select=group_id,user_id,added_by&user_id=eq.${currentProfile.id}`);
     const groupIds = [...new Set(memberships.map(row => row.group_id).filter(Boolean))];
 
     if (!groupIds.length) {
       res.status(200).json({
-        user: formatUser(currentProfile),
+        user: formatUser(currentProfile, { includeCrypto: true }),
         memberDirectory,
         groups: []
       });
@@ -28,15 +29,16 @@ module.exports = async function handler(req, res) {
     }
 
     const groupFilter = inFilter(groupIds);
-    const [groups, channels, messages, groupMembers, memberProfiles, availabilityRows, calls, tasks] = await Promise.all([
+    const [groups, channels, messages, groupMembers, memberProfiles, availabilityRows, calls, tasks, groupKeyRows] = await Promise.all([
       supabaseRest(`chat_groups?select=id,name,created_by,leader_id,created_at&id=${groupFilter}&order=created_at.asc`),
       supabaseRest(`chat_channels?select=id,group_id,name,created_at&group_id=${groupFilter}&order=created_at.asc`),
-      supabaseRest(`chat_messages?select=id,group_id,channel_id,sender_id,sender_name,body,created_at&group_id=${groupFilter}&order=created_at.asc`),
+      supabaseRest(`chat_messages?select=id,group_id,channel_id,sender_id,sender_name,body,body_ciphertext,body_iv,body_version,created_at&group_id=${groupFilter}&order=created_at.asc`),
       supabaseRest(`chat_group_members?select=group_id,user_id,added_by&group_id=${groupFilter}`),
       supabaseRest(`chat_group_member_profiles?select=group_id,user_id,role,current_task,stage,workload,deadline&group_id=${groupFilter}`),
       supabaseRest(`chat_group_member_availability?select=group_id,user_id,day_name,slots&group_id=${groupFilter}`),
       supabaseRest(`chat_group_calls?select=id,group_id,topic,scheduled_date,scheduled_time,created_by,generated_questions,created_at&group_id=${groupFilter}&order=scheduled_date.desc,scheduled_time.desc`),
-      supabaseRest(`chat_group_tasks?select=id,group_id,title,assignee_name,assignee_user_id,priority_rank,duration_days,status,created_by,created_at&group_id=${groupFilter}&order=priority_rank.asc,created_at.desc`)
+      supabaseRest(`chat_group_tasks?select=id,group_id,title,assignee_name,assignee_user_id,priority_rank,duration_days,status,created_by,created_at&group_id=${groupFilter}&order=priority_rank.asc,created_at.desc`),
+      supabaseRest(`chat_group_keys?select=group_id,user_id,encrypted_group_key,encrypted_group_key_iv,key_version&group_id=${groupFilter}&user_id=eq.${currentProfile.id}`)
     ]);
 
     const allUserIds = [...new Set(groupMembers.map(row => row.user_id).filter(Boolean))];
@@ -44,7 +46,7 @@ module.exports = async function handler(req, res) {
 
     const [memberRows, callParticipants] = await Promise.all([
       allUserIds.length
-        ? supabaseRest(`profiles?select=id,username,email,full_name,role&id=${inFilter(allUserIds)}`)
+        ? supabaseRest(`profiles?select=id,username,email,full_name,role,public_key_jwk&id=${inFilter(allUserIds)}`)
         : Promise.resolve([]),
       callIds.length
         ? supabaseRest(`chat_group_call_participants?select=call_id,user_id&call_id=${inFilter(callIds)}`)
@@ -119,6 +121,7 @@ module.exports = async function handler(req, res) {
       });
       return acc;
     }, {});
+    const groupKeyByGroupId = new Map(groupKeyRows.map(row => [String(row.group_id), row]));
 
     const stateGroups = groups.map(group => {
       const groupMemberRows = membersByGroup[group.id] || [];
@@ -135,9 +138,19 @@ module.exports = async function handler(req, res) {
             senderId: message.sender_id,
             sender: message.sender_name,
             text: message.body,
+            ciphertext: message.body_ciphertext || '',
+            iv: message.body_iv || '',
+            version: Number(message.body_version || 1),
             createdAt: message.created_at
           }))
         })),
+        keyEnvelope: groupKeyByGroupId.get(String(group.id))
+          ? {
+              encryptedKey: groupKeyByGroupId.get(String(group.id)).encrypted_group_key,
+              iv: groupKeyByGroupId.get(String(group.id)).encrypted_group_key_iv,
+              version: Number(groupKeyByGroupId.get(String(group.id)).key_version || 1)
+            }
+          : null,
         members: groupMemberRows.map(membership => {
           const profile = profilesById.get(String(membership.user_id)) || {};
           const memberProfile = memberProfilesByKey.get(`${group.id}:${membership.user_id}`) || {};
@@ -146,6 +159,7 @@ module.exports = async function handler(req, res) {
             username: profile.username || '',
             email: profile.email || '',
             full_name: profile.full_name || profile.username || profile.email || 'Team member',
+            public_key_jwk: profile.public_key_jwk || null,
             role: memberProfile.role || profile.role || 'Team member',
             current_task: memberProfile.current_task || '',
             stage: memberProfile.stage || 'Not set',
@@ -162,7 +176,7 @@ module.exports = async function handler(req, res) {
     });
 
     res.status(200).json({
-      user: formatUser(currentProfile),
+      user: formatUser(currentProfile, { includeCrypto: true }),
       memberDirectory,
       groups: stateGroups
     });

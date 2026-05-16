@@ -3,6 +3,8 @@ const {
   createSession,
   ensureShadowAuthUser,
   formatUser,
+  PRIVATE_KEY_ITERATIONS,
+  requireSecureRequest,
   supabaseRest
 } = require('../_lib/custom-auth');
 
@@ -11,14 +13,20 @@ module.exports = async function handler(req, res) {
     res.status(405).json({ error: 'Method not allowed.' });
     return;
   }
+  if (!requireSecureRequest(req, res)) return;
 
   const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
   const username = String(req.body?.username || '').trim().toLowerCase();
   const fullName = String(req.body?.fullName || '').trim();
+  const publicKeyJwk = req.body?.publicKeyJwk || null;
+  const encryptedPrivateKey = String(req.body?.encryptedPrivateKey || '');
+  const privateKeyIv = String(req.body?.privateKeyIv || '');
+  const privateKeySalt = String(req.body?.privateKeySalt || '');
+  const privateKeyIterations = Number(req.body?.privateKeyIterations || PRIVATE_KEY_ITERATIONS);
 
-  if (!email || !password || !username || !fullName) {
-    res.status(400).json({ error: 'Email, password, username, and full name are required.' });
+  if (!email || !password || !username || !fullName || !publicKeyJwk || !encryptedPrivateKey || !privateKeyIv || !privateKeySalt) {
+    res.status(400).json({ error: 'Email, password, username, full name, and device key material are required.' });
     return;
   }
 
@@ -61,11 +69,16 @@ module.exports = async function handler(req, res) {
           password_hash: passwordRecord.hash,
           password_salt: passwordRecord.salt,
           password_iterations: passwordRecord.iterations,
-          password_algorithm: 'pbkdf2-sha256'
+          password_algorithm: 'pbkdf2-sha256',
+          public_key_jwk: publicKeyJwk,
+          encrypted_private_key: encryptedPrivateKey,
+          private_key_iv: privateKeyIv,
+          private_key_salt: privateKeySalt,
+          private_key_iterations: privateKeyIterations
         }
       });
 
-      const refreshedProfiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations&id=eq.${existingEmailProfile.id}&limit=1`);
+      const refreshedProfiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${existingEmailProfile.id}&limit=1`);
       profile = refreshedProfiles[0];
     } else {
       const shadowUser = await ensureShadowAuthUser({ email, fullName, username });
@@ -80,14 +93,19 @@ module.exports = async function handler(req, res) {
           password_hash: passwordRecord.hash,
           password_salt: passwordRecord.salt,
           password_iterations: passwordRecord.iterations,
-          password_algorithm: 'pbkdf2-sha256'
+          password_algorithm: 'pbkdf2-sha256',
+          public_key_jwk: publicKeyJwk,
+          encrypted_private_key: encryptedPrivateKey,
+          private_key_iv: privateKeyIv,
+          private_key_salt: privateKeySalt,
+          private_key_iterations: privateKeyIterations
         }
       });
       profile = createdProfiles[0];
     }
 
-    await createSession(res, profile.id);
-    res.status(200).json({ user: formatUser(profile) });
+    await createSession(req, res, profile.id);
+    res.status(200).json({ user: formatUser(profile, { includeCrypto: true }) });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Could not create the account.' });
   }

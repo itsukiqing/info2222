@@ -1,6 +1,7 @@
 const {
   createSession,
   formatUser,
+  requireSecureRequest,
   supabaseRest,
   verifyPassword
 } = require('../_lib/custom-auth');
@@ -10,6 +11,7 @@ module.exports = async function handler(req, res) {
     res.status(405).json({ error: 'Method not allowed.' });
     return;
   }
+  if (!requireSecureRequest(req, res)) return;
 
   const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
@@ -20,7 +22,7 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations&email=eq.${encodeURIComponent(email)}&limit=1`);
+    const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&email=eq.${encodeURIComponent(email)}&limit=1`);
     const profile = profiles[0];
 
     if (!profile) {
@@ -38,8 +40,8 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    await createSession(res, profile.id);
-    res.status(200).json({ user: formatUser(profile) });
+    await createSession(req, res, profile.id);
+    res.status(200).json({ user: formatUser(profile, { includeCrypto: true }) });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Could not sign in.' });
   }
