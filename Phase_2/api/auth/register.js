@@ -8,6 +8,11 @@ const {
   supabaseRest
 } = require('../_lib/custom-auth');
 
+function firstRow(payload) {
+  if (Array.isArray(payload)) return payload[0] || null;
+  return payload || null;
+}
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed.' });
@@ -79,7 +84,7 @@ module.exports = async function handler(req, res) {
       });
 
       const refreshedProfiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${existingEmailProfile.id}&limit=1`);
-      profile = refreshedProfiles[0];
+      profile = firstRow(refreshedProfiles);
     } else {
       const shadowUser = await ensureShadowAuthUser({ email, fullName, username });
       const createdProfiles = await supabaseRest('profiles', {
@@ -101,7 +106,11 @@ module.exports = async function handler(req, res) {
           private_key_iterations: privateKeyIterations
         }
       });
-      profile = createdProfiles[0];
+      profile = firstRow(createdProfiles);
+    }
+
+    if (!profile?.id) {
+      throw new Error('The account was created, but the profile record was not returned by the database.');
     }
 
     await createSession(req, res, profile.id);
