@@ -223,6 +223,18 @@ function $all(selector) {
   return [...document.querySelectorAll(selector)];
 }
 
+function isLocalBrowserHost() {
+  return ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+}
+
+function isBrowserSecureForCredentials() {
+  return window.location.protocol === 'https:' || isLocalBrowserHost();
+}
+
+function getSecureTransportWarning() {
+  return 'Use HTTPS to sign in or register. Your browser must validate the server certificate before sending credentials.';
+}
+
 async function apiRequest(path, options = {}) {
   const response = await fetch(path, {
     method: options.method || 'GET',
@@ -541,6 +553,11 @@ function bindAuth() {
     e.preventDefault();
     const email = $('#loginEmail').value.trim().toLowerCase();
     const password = $('#loginPassword').value;
+
+    if (supabaseClient && !isBrowserSecureForCredentials()) {
+      $('#loginFeedback').textContent = getSecureTransportWarning();
+      return;
+    }
 
     if (authFormMode === 'register') {
       const registrationEmail = $('#registerEmail').value.trim().toLowerCase();
@@ -892,6 +909,13 @@ function syncAuthFormMode() {
   $('#registerEmail').required = isRegistering;
   $('#loginPassword').autocomplete = isRegistering ? 'new-password' : 'current-password';
   $('#loginPassword').placeholder = isRegistering ? 'Create a password' : 'Enter your password';
+  const blockSensitiveAuth = authMode === 'custom' && !isBrowserSecureForCredentials();
+  $('#authSubmitBtn').disabled = blockSensitiveAuth;
+  if (blockSensitiveAuth) {
+    $('#loginFeedback').textContent = getSecureTransportWarning();
+  } else if ($('#loginFeedback').textContent === getSecureTransportWarning()) {
+    $('#loginFeedback').textContent = '';
+  }
 }
 
 function syncAuthHint() {
@@ -900,7 +924,7 @@ function syncAuthHint() {
   if (authMode === 'custom') {
     hint.innerHTML = `
       <strong>Custom auth</strong>
-      <span>Passwords are stored with PBKDF2 + salt, sessions are server-side, and group messages are end-to-end encrypted in the browser.</span>
+      <span>Passwords are stored with PBKDF2 + salt, sessions are server-side, and group messages are end-to-end encrypted in the browser. Sign-in is only allowed over HTTPS so the browser can validate the server certificate before sending credentials.</span>
     `;
     return;
   }
