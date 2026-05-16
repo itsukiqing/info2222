@@ -254,7 +254,11 @@ async function ensureShadowAuthUser({ email, fullName, username }) {
       }
     }
   });
-  return payload.user;
+  const user = payload?.user || payload;
+  if (!user?.id) {
+    throw new Error('Supabase did not return the shadow auth user record.');
+  }
+  return user;
 }
 
 module.exports = {

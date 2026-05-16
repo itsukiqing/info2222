@@ -87,6 +87,9 @@ module.exports = async function handler(req, res) {
       profile = firstRow(refreshedProfiles);
     } else {
       const shadowUser = await ensureShadowAuthUser({ email, fullName, username });
+      if (!shadowUser?.id) {
+        throw new Error('The shadow auth user could not be created.');
+      }
       const createdProfiles = await supabaseRest('profiles', {
         method: 'POST',
         body: {
