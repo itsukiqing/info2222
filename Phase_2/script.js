@@ -499,11 +499,7 @@ async function encryptChatTextForGroup(group, text) {
 }
 
 async function decryptChatTextForGroup(group, message) {
-  if (message.text && !message.ciphertext) {
-    return supabaseClient
-      ? '[Legacy unencrypted message - re-send this message after enabling E2EE]'
-      : message.text;
-  }
+  if (message.text && !message.ciphertext) return message.text;
   if (!message.ciphertext) return '';
   try {
     const groupKey = await getGroupKey(group, message.version);
