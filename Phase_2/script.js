@@ -202,6 +202,11 @@ let activeChatUtility = 'chat';
 let securityDemoDisableEncryptionForNextMessage = false;
 let securityLatestMessagePayload = 'No message inspected yet.';
 let securityAttackSummary = 'No attack run yet.';
+let securityRateLimitState = {
+  disabled: false,
+  maxAttempts: 5,
+  windowMs: 60000
+};
 const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -3070,6 +3075,8 @@ function renderSecurityLab() {
   const toggleBtn = $('#toggleInsecureChatBtn');
   const inspectBtn = $('#inspectLatestMessageBtn');
   const attackEmail = $('#securityAttackEmail');
+  const rateLimitBadge = $('#securityRateLimitBadge');
+  const toggleRateLimitBtn = $('#toggleRateLimitBtn');
 
   if (attackEmail && !attackEmail.value && currentUser?.email) {
     attackEmail.value = currentUser.email;
@@ -3089,8 +3096,33 @@ function renderSecurityLab() {
 
   toggleBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
   inspectBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
+  if (securityRateLimitState.disabled) {
+    rateLimitBadge.textContent = 'Rate limit off';
+    toggleRateLimitBtn.textContent = 'Re-enable login rate limit';
+    toggleRateLimitBtn.classList.remove('danger-btn');
+    toggleRateLimitBtn.classList.add('secondary-btn');
+  } else {
+    rateLimitBadge.textContent = `Rate limit on (${securityRateLimitState.maxAttempts}/min)`;
+    toggleRateLimitBtn.textContent = 'Disable login rate limit';
+    toggleRateLimitBtn.classList.add('danger-btn');
+    toggleRateLimitBtn.classList.remove('secondary-btn');
+  }
+  toggleRateLimitBtn.disabled = !supabaseClient || !currentUser;
   $('#latestMessagePayload').textContent = securityLatestMessagePayload;
   $('#securityAttackResults').textContent = securityAttackSummary;
+}
+
+async function refreshLoginRateLimitStatus() {
+  if (!supabaseClient || !currentUser) return;
+  try {
+    const payload = await performBackendAction('get_login_rate_limit_status');
+    securityRateLimitState = {
+      ...securityRateLimitState,
+      ...(payload || {})
+    };
+  } catch (error) {
+    console.warn('Could not load login rate limit status.', error);
+  }
 }
 
 function bindSecurityLab() {
@@ -3119,6 +3151,31 @@ function bindSecurityLab() {
       $('#securityMessageFeedback').textContent = 'Latest message record loaded from the database.';
     } catch (error) {
       $('#securityMessageFeedback').textContent = error.message || 'Could not inspect the latest message.';
+    }
+    renderSecurityLab();
+  });
+
+  $('#toggleRateLimitBtn').addEventListener('click', async () => {
+    if (!supabaseClient || !currentUser) {
+      $('#securityAttackFeedback').textContent = 'Sign in before changing the login protection demo.';
+      return;
+    }
+    $('#securityAttackFeedback').textContent = securityRateLimitState.disabled
+      ? 'Re-enabling the login rate limit...'
+      : 'Disabling the login rate limit for the demo...';
+    try {
+      const payload = await performBackendAction('set_login_rate_limit_disabled', {
+        disabled: !securityRateLimitState.disabled
+      });
+      securityRateLimitState = {
+        ...securityRateLimitState,
+        ...(payload || {})
+      };
+      $('#securityAttackFeedback').textContent = securityRateLimitState.disabled
+        ? 'Login rate limiting is now disabled for the brute-force demo.'
+        : 'Login rate limiting is active again.';
+    } catch (error) {
+      $('#securityAttackFeedback').textContent = error.message || 'Could not change the login rate limit demo state.';
     }
     renderSecurityLab();
   });
@@ -3155,6 +3212,7 @@ function bindSecurityLab() {
     const blockedAttempts = results.filter(status => status === 429).length;
     const failedAttempts = results.filter(status => status === 401).length;
     securityAttackSummary = [
+      `Rate limit status: ${securityRateLimitState.disabled ? 'disabled for demo' : `enabled (${securityRateLimitState.maxAttempts} attempts / ${Math.round(securityRateLimitState.windowMs / 1000)}s)`}`,
       `Target: ${email}`,
       `Attempts sent: ${count}`,
       `HTTP 401 responses: ${failedAttempts}`,
@@ -3167,8 +3225,11 @@ function bindSecurityLab() {
     $('#securityAttackFeedback').textContent = blockedAttempts
       ? 'The server blocked some attempts.'
       : 'Every bad guess was processed. This is the vulnerability to record.';
+    await refreshLoginRateLimitStatus();
     renderSecurityLab();
   });
+
+  refreshLoginRateLimitStatus().then(renderSecurityLab);
 }
 
 function bindGroupModal() {

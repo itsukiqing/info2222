@@ -6,6 +6,15 @@ const PBKDF2_ITERATIONS = 310000;
 const PBKDF2_KEYLEN = 32;
 const PBKDF2_DIGEST = 'sha256';
 const PRIVATE_KEY_ITERATIONS = 310000;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 1000 * 60;
+const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
+
+const loginRateLimitStore = globalThis.__unigroupLoginRateLimitStore || new Map();
+globalThis.__unigroupLoginRateLimitStore = loginRateLimitStore;
+
+if (typeof globalThis.__unigroupDisableLoginRateLimit === 'undefined') {
+  globalThis.__unigroupDisableLoginRateLimit = false;
+}
 
 function isLocalHost(hostname) {
   return ['localhost', '127.0.0.1', '::1'].includes(String(hostname || '').split(':')[0]);
@@ -17,6 +26,12 @@ function getRequestHost(req) {
 
 function getForwardedProto(req) {
   return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+}
+
+function getClientAddress(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '')
+    .split(',')[0]
+    .trim();
 }
 
 function isSecureRequest(req) {
@@ -124,6 +139,72 @@ function verifyPassword(password, profile) {
   const actualBuffer = Buffer.from(actual, 'hex');
   if (expectedBuffer.length !== actualBuffer.length) return false;
   return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+function buildLoginRateLimitKey(req, email) {
+  return `${String(email || '').trim().toLowerCase()}::${getClientAddress(req) || 'unknown'}`;
+}
+
+function pruneLoginAttemptEntry(entry, now = Date.now()) {
+  const attempts = (entry?.attempts || []).filter(timestamp => now - timestamp < LOGIN_RATE_LIMIT_WINDOW_MS);
+  return {
+    attempts,
+    blockedUntil: attempts.length >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+      ? attempts[0] + LOGIN_RATE_LIMIT_WINDOW_MS
+      : 0
+  };
+}
+
+function getLoginRateLimitStatusForKey(key, now = Date.now()) {
+  if (!key) {
+    return {
+      disabled: Boolean(globalThis.__unigroupDisableLoginRateLimit),
+      allowed: true,
+      blockedUntil: 0,
+      remainingAttempts: LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+    };
+  }
+
+  const entry = pruneLoginAttemptEntry(loginRateLimitStore.get(key), now);
+  if (entry.attempts.length) {
+    loginRateLimitStore.set(key, entry);
+  } else {
+    loginRateLimitStore.delete(key);
+  }
+
+  const blockedUntil = entry.blockedUntil > now ? entry.blockedUntil : 0;
+  return {
+    disabled: Boolean(globalThis.__unigroupDisableLoginRateLimit),
+    allowed: Boolean(globalThis.__unigroupDisableLoginRateLimit) || !blockedUntil,
+    blockedUntil,
+    remainingAttempts: Math.max(0, LOGIN_RATE_LIMIT_MAX_ATTEMPTS - entry.attempts.length)
+  };
+}
+
+function registerFailedLoginAttempt(key, now = Date.now()) {
+  if (!key || globalThis.__unigroupDisableLoginRateLimit) return getLoginRateLimitStatusForKey(key, now);
+  const entry = pruneLoginAttemptEntry(loginRateLimitStore.get(key), now);
+  entry.attempts.push(now);
+  const nextEntry = pruneLoginAttemptEntry(entry, now);
+  loginRateLimitStore.set(key, nextEntry);
+  return getLoginRateLimitStatusForKey(key, now);
+}
+
+function clearLoginRateLimit(key) {
+  if (!key) return;
+  loginRateLimitStore.delete(key);
+}
+
+function setLoginRateLimitDisabled(disabled) {
+  globalThis.__unigroupDisableLoginRateLimit = Boolean(disabled);
+}
+
+function getLoginRateLimitSnapshot() {
+  return {
+    disabled: Boolean(globalThis.__unigroupDisableLoginRateLimit),
+    windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
+    maxAttempts: LOGIN_RATE_LIMIT_MAX_ATTEMPTS
+  };
 }
 
 function parseCookies(req) {
@@ -264,17 +345,23 @@ async function ensureShadowAuthUser({ email, fullName, username }) {
 module.exports = {
   SESSION_COOKIE_NAME,
   PRIVATE_KEY_ITERATIONS,
+  buildLoginRateLimitKey,
+  clearLoginRateLimit,
   createPasswordRecord,
   verifyPassword,
   supabaseRest,
   supabaseAuthAdmin,
   applySecurityHeaders,
+  getLoginRateLimitSnapshot,
+  getLoginRateLimitStatusForKey,
   requireSecureRequest,
+  registerFailedLoginAttempt,
   createSession,
   clearSession,
   getSessionProfile,
   requireSessionProfile,
   ensureShadowAuthUser,
   formatCryptoMaterial,
-  formatUser
+  formatUser,
+  setLoginRateLimitDisabled
 };

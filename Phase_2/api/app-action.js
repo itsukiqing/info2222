@@ -1,4 +1,10 @@
-const { requireSecureRequest, requireSessionProfile, supabaseRest } = require('./_lib/custom-auth');
+const {
+  getLoginRateLimitSnapshot,
+  requireSecureRequest,
+  requireSessionProfile,
+  setLoginRateLimitDisabled,
+  supabaseRest
+} = require('./_lib/custom-auth');
 
 async function getGroupForUser(groupId, userId) {
   const groups = await supabaseRest(`chat_groups?select=id,name,created_by,leader_id&id=eq.${groupId}&limit=1`);
@@ -60,6 +66,17 @@ module.exports = async function handler(req, res) {
       await getGroupForUser(groupId, currentProfile.id);
       const rows = await supabaseRest(`chat_messages?select=id,group_id,channel_id,sender_id,sender_name,body,body_ciphertext,body_iv,body_version,created_at&group_id=eq.${groupId}&order=created_at.desc&limit=1`);
       res.status(200).json({ message: rows[0] || null });
+      return;
+    }
+
+    if (action === 'get_login_rate_limit_status') {
+      res.status(200).json(getLoginRateLimitSnapshot());
+      return;
+    }
+
+    if (action === 'set_login_rate_limit_disabled') {
+      setLoginRateLimitDisabled(Boolean(req.body?.disabled));
+      res.status(200).json(getLoginRateLimitSnapshot());
       return;
     }
 

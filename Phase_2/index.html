@@ -386,7 +386,7 @@
           <div class="card">
             <div class="card-header">
               <h3>Brute-force / no rate limiting demo</h3>
-              <span class="badge">Attack simulation</span>
+              <span class="badge" id="securityRateLimitBadge">Rate limit on</span>
             </div>
             <p class="muted">Run repeated incorrect sign-in attempts against the login endpoint and check whether the server slows or blocks them.</p>
             <form id="securityAttackForm" class="stack-form">
@@ -394,8 +394,9 @@
                 <input id="securityAttackEmail" type="email" placeholder="student@example.com" />
               </label>
               <label class="stack-label">Attempt count
-                <input id="securityAttackCount" type="number" min="3" max="20" value="5" />
+                <input id="securityAttackCount" type="number" min="3" max="20" value="8" />
               </label>
+              <button type="button" class="danger-btn" id="toggleRateLimitBtn">Disable login rate limit</button>
               <button type="submit" class="primary-btn">Run failed sign-in burst</button>
             </form>
             <p id="securityAttackFeedback" class="feedback-text" role="status"></p>

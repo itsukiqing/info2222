@@ -1,6 +1,10 @@
 const {
+  buildLoginRateLimitKey,
+  clearLoginRateLimit,
   createSession,
   formatUser,
+  getLoginRateLimitStatusForKey,
+  registerFailedLoginAttempt,
   requireSecureRequest,
   supabaseRest,
   verifyPassword
@@ -15,9 +19,21 @@ module.exports = async function handler(req, res) {
 
   const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
+  const rateLimitKey = buildLoginRateLimitKey(req, email);
 
   if (!email || !password) {
     res.status(400).json({ error: 'Email and password are required.' });
+    return;
+  }
+
+  const rateLimitStatus = getLoginRateLimitStatusForKey(rateLimitKey);
+  if (!rateLimitStatus.allowed) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((rateLimitStatus.blockedUntil - Date.now()) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSeconds));
+    res.status(429).json({
+      error: 'Too many failed sign-in attempts. Please wait and try again.',
+      retryAfterSeconds
+    });
     return;
   }
 
@@ -26,6 +42,7 @@ module.exports = async function handler(req, res) {
     const profile = profiles[0];
 
     if (!profile) {
+      registerFailedLoginAttempt(rateLimitKey);
       res.status(401).json({ error: 'Email or password is incorrect.' });
       return;
     }
@@ -36,10 +53,12 @@ module.exports = async function handler(req, res) {
     }
 
     if (!verifyPassword(password, profile)) {
+      registerFailedLoginAttempt(rateLimitKey);
       res.status(401).json({ error: 'Email or password is incorrect.' });
       return;
     }
 
+    clearLoginRateLimit(rateLimitKey);
     await createSession(req, res, profile.id);
     res.status(200).json({ user: formatUser(profile, { includeCrypto: true }) });
   } catch (error) {
