@@ -245,9 +245,9 @@
               Day
               <select id="meetingDaySelect"></select>
             </label>
-            <button type="button" class="small-btn meeting-edit-toggle" id="toggleFreeSlotsBtn">Mark your free slots</button>
+            <button type="button" class="small-btn meeting-edit-toggle" id="toggleFreeSlotsBtn">Choose your free slots</button>
           </div>
-          <p id="meetingEditHint" class="meeting-edit-hint">Turn this on, then click cells in your row to add or remove free slots.</p>
+          <p id="meetingEditHint" class="meeting-edit-hint">Open the picker to choose the hours when you are free for the selected day.</p>
           <div id="availabilityGrid" class="availability-grid"></div>
           <div class="legend">
             <span><i class="legend-box selected"></i> Selected by member</span>
@@ -470,6 +470,24 @@
         <button class="primary-btn" type="submit">Add to group</button>
         <p id="addMemberFeedback" class="feedback-text login-feedback" role="alert"></p>
       </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="meetingSlotsModal">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3>Select your free slots</h3>
+        <button class="icon-btn" id="closeMeetingSlotsModal" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="stack-form">
+        <label class="stack-label">Day
+          <select id="meetingSlotsDaySelect"></select>
+        </label>
+        <div id="meetingSlotsPicker" class="meeting-slots-picker"></div>
+        <p class="muted">Choose every one-hour slot when you are available. The meeting grid will update after you save.</p>
+        <button class="primary-btn" type="button" id="saveMeetingSlotsBtn">Save availability</button>
+        <p id="meetingSlotsFeedback" class="feedback-text login-feedback" role="alert"></p>
+      </div>
     </div>
   </div>
 

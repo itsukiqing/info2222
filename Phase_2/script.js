@@ -1390,6 +1390,60 @@ async function saveCurrentUserAvailability(day, slots) {
   await loadBackendState();
 }
 
+function openMeetingSlotsModal() {
+  if (supabaseClient && !getActiveGroup()) {
+    $('#meetingFeedback').textContent = 'Select a team chat first to set your availability.';
+    return;
+  }
+  const currentDay = $('#meetingDaySelect').value || MEETING_DAYS[0];
+  $('#meetingSlotsDaySelect').innerHTML = MEETING_DAYS.map(day => `<option value="${day}">${day}</option>`).join('');
+  $('#meetingSlotsDaySelect').value = currentDay;
+  $('#meetingSlotsFeedback').textContent = '';
+  renderMeetingSlotsPicker();
+  $('#meetingSlotsModal').classList.remove('hidden');
+}
+
+function closeMeetingSlotsModal() {
+  $('#meetingSlotsModal').classList.add('hidden');
+}
+
+function renderMeetingSlotsPicker() {
+  const day = $('#meetingSlotsDaySelect').value || MEETING_DAYS[0];
+  const editableMember = getEditableMeetingMemberName();
+  const selectedSlots = meetingAvailability[day]?.[editableMember] || [];
+  $('#meetingSlotsPicker').innerHTML = timeSlots.map(slot => `
+    <label class="meeting-slot-option">
+      <input type="checkbox" value="${slot}" ${selectedSlots.includes(slot) ? 'checked' : ''} />
+      <span>${slotToReadable(slot, true)}</span>
+    </label>
+  `).join('');
+}
+
+async function saveMeetingSlotsFromModal() {
+  const day = $('#meetingSlotsDaySelect').value || MEETING_DAYS[0];
+  const editableMember = getEditableMeetingMemberName();
+  const nextSlots = [...$('#meetingSlotsPicker').querySelectorAll('input:checked')]
+    .map(input => input.value)
+    .sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
+
+  if (!meetingAvailability[day]) {
+    meetingAvailability[day] = {};
+  }
+  meetingAvailability[day][editableMember] = nextSlots;
+  $('#meetingSlotsFeedback').textContent = `Saving your availability for ${day}...`;
+  try {
+    await saveCurrentUserAvailability(day, nextSlots);
+    $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
+    $('#meetingSlotsFeedback').textContent = `Saved ${nextSlots.length ? nextSlots.map(slot => slotToReadable(slot, true)).join(', ') : 'no free slots'} for ${day}.`;
+    $('#meetingDaySelect').value = day;
+    renderMeeting();
+    closeMeetingSlotsModal();
+  } catch (error) {
+    $('#meetingSlotsFeedback').textContent = error.message || `Could not update your availability for ${day}.`;
+    renderMeeting();
+  }
+}
+
 async function saveCurrentUserDeadline(deadline) {
   const normalizedDeadline = deadline || null;
   const activeMember = getActiveTeamMembers().find(member => String(member.id) === String(currentUser?.id));
@@ -2358,32 +2412,12 @@ function bindMeeting() {
   });
 
   $('#meetingDaySelect').addEventListener('change', renderAvailabilityGrid);
-  $('#toggleFreeSlotsBtn').addEventListener('click', () => {
-    meetingEditMode = !meetingEditMode;
-    syncMeetingEditState();
-    renderAvailabilityGrid();
-  });
-  $('#availabilityGrid').addEventListener('click', async e => {
-    const cell = e.target.closest('.availability-cell.editable-cell');
-    if (!cell || !meetingEditMode) return;
-
-    const day = $('#meetingDaySelect').value || MEETING_DAYS[0];
-    const slot = cell.dataset.slot;
-    const editableMember = getEditableMeetingMemberName();
-    const slots = meetingAvailability[day]?.[editableMember] || [];
-    const nextSlots = slots.includes(slot)
-      ? slots.filter(value => value !== slot)
-      : [...slots, slot].sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
-
-    meetingAvailability[day][editableMember] = nextSlots;
-    $('#meetingFeedback').textContent = `Saving your availability for ${day}...`;
-    try {
-      await saveCurrentUserAvailability(day, nextSlots);
-      $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
-    } catch (error) {
-      $('#meetingFeedback').textContent = error.message || `Could not update your availability for ${day}.`;
-    }
-    renderAvailabilityGrid();
+  $('#toggleFreeSlotsBtn').addEventListener('click', openMeetingSlotsModal);
+  $('#meetingSlotsDaySelect').addEventListener('change', renderMeetingSlotsPicker);
+  $('#saveMeetingSlotsBtn').addEventListener('click', saveMeetingSlotsFromModal);
+  $('#closeMeetingSlotsModal').addEventListener('click', closeMeetingSlotsModal);
+  $('#meetingSlotsModal').addEventListener('click', e => {
+    if (e.target.id === 'meetingSlotsModal') closeMeetingSlotsModal();
   });
 }
 
@@ -2434,13 +2468,12 @@ function renderAvailabilityGrid() {
       ${timeSlots.map(slot => {
         const isSelected = dayData[name].includes(slot);
         const isOverlap = overlaps.includes(slot);
-        const isEditable = name === editableMember && meetingEditMode;
-        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''} ${isEditable ? 'editable-cell' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
+        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
       }).join('')}
     </div>
   `).join('');
   $('#availabilityGrid').innerHTML = html;
-  $('#availabilityGrid').classList.toggle('is-editing', meetingEditMode);
+  $('#availabilityGrid').classList.remove('is-editing');
   updateMeetingSuggestion();
 }
 
@@ -2465,9 +2498,10 @@ function ensureEditableMeetingMember() {
 }
 
 function syncMeetingEditState() {
-  $('#toggleFreeSlotsBtn').classList.toggle('active', meetingEditMode);
-  $('#toggleFreeSlotsBtn').textContent = meetingEditMode ? 'Done marking slots' : 'Mark your free slots';
-  $('#meetingEditHint').classList.toggle('visible', meetingEditMode);
+  meetingEditMode = false;
+  $('#toggleFreeSlotsBtn').classList.remove('active');
+  $('#toggleFreeSlotsBtn').textContent = 'Choose your free slots';
+  $('#meetingEditHint').classList.add('visible');
 }
 
 function updateMeetingSuggestion() {
