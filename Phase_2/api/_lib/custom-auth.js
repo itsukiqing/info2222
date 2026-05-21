@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const argon2 = require('argon2');
 
 const SESSION_COOKIE_NAME = 'unigroup_session';
 const SESSION_DURATION_MS = 1000 * 60 * 60 * 24 * 14;
@@ -6,6 +7,9 @@ const PBKDF2_ITERATIONS = 310000;
 const PBKDF2_KEYLEN = 32;
 const PBKDF2_DIGEST = 'sha256';
 const PRIVATE_KEY_ITERATIONS = 310000;
+const ARGON2_MEMORY_COST = 19456;
+const ARGON2_TIME_COST = 2;
+const ARGON2_PARALLELISM = 1;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 1000 * 60;
 const LOGIN_RATE_LIMIT_MAX_ATTEMPTS = 5;
 
@@ -122,7 +126,7 @@ function hashPassword(password, salt, iterations = PBKDF2_ITERATIONS) {
   return crypto.pbkdf2Sync(password, salt, iterations, PBKDF2_KEYLEN, PBKDF2_DIGEST).toString('hex');
 }
 
-function createPasswordRecord(password) {
+function createLegacyPasswordRecord(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   return {
     salt,
@@ -131,7 +135,36 @@ function createPasswordRecord(password) {
   };
 }
 
-function verifyPassword(password, profile) {
+async function createPasswordRecord(password) {
+  const hash = await argon2.hash(password, {
+    type: argon2.argon2id,
+    memoryCost: ARGON2_MEMORY_COST,
+    timeCost: ARGON2_TIME_COST,
+    parallelism: ARGON2_PARALLELISM
+  });
+  return {
+    hash,
+    salt: null,
+    iterations: null,
+    algorithm: 'argon2id'
+  };
+}
+
+function isArgon2Profile(profile) {
+  const algorithm = String(profile?.password_algorithm || '').toLowerCase();
+  const hash = String(profile?.password_hash || '');
+  return algorithm === 'argon2id' || hash.startsWith('$argon2id$');
+}
+
+async function verifyPassword(password, profile) {
+  if (isArgon2Profile(profile)) {
+    try {
+      return await argon2.verify(String(profile.password_hash || ''), password);
+    } catch (error) {
+      return false;
+    }
+  }
+
   const iterations = Number(profile.password_iterations || PBKDF2_ITERATIONS);
   const expected = String(profile.password_hash || '');
   const actual = hashPassword(password, String(profile.password_salt || ''), iterations);
@@ -139,6 +172,10 @@ function verifyPassword(password, profile) {
   const actualBuffer = Buffer.from(actual, 'hex');
   if (expectedBuffer.length !== actualBuffer.length) return false;
   return crypto.timingSafeEqual(expectedBuffer, actualBuffer);
+}
+
+function needsPasswordUpgrade(profile) {
+  return !isArgon2Profile(profile);
 }
 
 function buildLoginRateLimitKey(req, email) {
@@ -308,7 +345,7 @@ async function getSessionProfile(req) {
     return null;
   }
 
-  const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${session.user_id}&limit=1`);
+  const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,password_algorithm,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${session.user_id}&limit=1`);
   return profiles[0] || null;
 }
 
@@ -363,5 +400,7 @@ module.exports = {
   ensureShadowAuthUser,
   formatCryptoMaterial,
   formatUser,
-  setLoginRateLimitDisabled
+  setLoginRateLimitDisabled,
+  needsPasswordUpgrade,
+  createLegacyPasswordRecord
 };

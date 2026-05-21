@@ -56,7 +56,7 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    const passwordRecord = createPasswordRecord(password);
+    const passwordRecord = await createPasswordRecord(password);
 
     let profile = null;
 
@@ -74,7 +74,7 @@ module.exports = async function handler(req, res) {
           password_hash: passwordRecord.hash,
           password_salt: passwordRecord.salt,
           password_iterations: passwordRecord.iterations,
-          password_algorithm: 'pbkdf2-sha256',
+          password_algorithm: passwordRecord.algorithm,
           public_key_jwk: publicKeyJwk,
           encrypted_private_key: encryptedPrivateKey,
           private_key_iv: privateKeyIv,
@@ -101,7 +101,7 @@ module.exports = async function handler(req, res) {
           password_hash: passwordRecord.hash,
           password_salt: passwordRecord.salt,
           password_iterations: passwordRecord.iterations,
-          password_algorithm: 'pbkdf2-sha256',
+          password_algorithm: passwordRecord.algorithm,
           public_key_jwk: publicKeyJwk,
           encrypted_private_key: encryptedPrivateKey,
           private_key_iv: privateKeyIv,

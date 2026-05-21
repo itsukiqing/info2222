@@ -2,8 +2,10 @@ const {
   buildLoginRateLimitKey,
   clearLoginRateLimit,
   createSession,
+  createPasswordRecord,
   formatUser,
   getLoginRateLimitStatusForKey,
+  needsPasswordUpgrade,
   registerFailedLoginAttempt,
   requireSecureRequest,
   supabaseRest,
@@ -38,7 +40,7 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&email=eq.${encodeURIComponent(email)}&limit=1`);
+    const profiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,password_algorithm,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&email=eq.${encodeURIComponent(email)}&limit=1`);
     const profile = profiles[0];
 
     if (!profile) {
@@ -52,10 +54,27 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    if (!verifyPassword(password, profile)) {
+    if (!(await verifyPassword(password, profile))) {
       registerFailedLoginAttempt(rateLimitKey);
       res.status(401).json({ error: 'Email or password is incorrect.' });
       return;
+    }
+
+    if (needsPasswordUpgrade(profile)) {
+      const upgradedPassword = await createPasswordRecord(password);
+      await supabaseRest(`profiles?id=eq.${profile.id}`, {
+        method: 'PATCH',
+        body: {
+          password_hash: upgradedPassword.hash,
+          password_salt: upgradedPassword.salt,
+          password_iterations: upgradedPassword.iterations,
+          password_algorithm: upgradedPassword.algorithm
+        }
+      });
+      profile.password_hash = upgradedPassword.hash;
+      profile.password_salt = upgradedPassword.salt;
+      profile.password_iterations = upgradedPassword.iterations;
+      profile.password_algorithm = upgradedPassword.algorithm;
     }
 
     clearLoginRateLimit(rateLimitKey);

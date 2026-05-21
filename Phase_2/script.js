@@ -946,7 +946,7 @@ function syncAuthHint() {
   if (authMode === 'custom') {
     hint.innerHTML = `
       <strong>Custom auth</strong>
-      <span>Passwords are stored with PBKDF2 + salt, sessions are server-side, and group messages are end-to-end encrypted in the browser. Sign-in is only allowed over HTTPS so the browser can validate the server certificate before sending credentials.</span>
+      <span>Passwords are stored with Argon2id, sessions are server-side, and group messages are end-to-end encrypted in the browser. Sign-in is only allowed over HTTPS so the browser can validate the server certificate before sending credentials.</span>
     `;
     return;
   }

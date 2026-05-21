@@ -7,7 +7,7 @@ create table if not exists public.profiles (
   password_hash text,
   password_salt text,
   password_iterations integer,
-  password_algorithm text default 'pbkdf2-sha256',
+  password_algorithm text default 'argon2id',
   public_key_jwk jsonb,
   encrypted_private_key text,
   private_key_iv text,
@@ -19,7 +19,7 @@ create table if not exists public.profiles (
 alter table public.profiles add column if not exists password_hash text;
 alter table public.profiles add column if not exists password_salt text;
 alter table public.profiles add column if not exists password_iterations integer;
-alter table public.profiles add column if not exists password_algorithm text default 'pbkdf2-sha256';
+alter table public.profiles add column if not exists password_algorithm text default 'argon2id';
 alter table public.profiles add column if not exists public_key_jwk jsonb;
 alter table public.profiles add column if not exists encrypted_private_key text;
 alter table public.profiles add column if not exists private_key_iv text;
