@@ -64,8 +64,8 @@
       </p>
 
       <div class="demo-login-hint" id="authHint">
-        <strong>Supabase Auth</strong>
-        <span>Enter an email/password user from your Supabase project.</span>
+        <strong>Custom auth</strong>
+        <span>Sign in with your team email and password.</span>
       </div>
     </div>
   </section>
@@ -93,6 +93,7 @@
           <button class="nav-link" data-section="calls">Initialiser</button>
           <button class="nav-link" data-section="checklist">To-Do List</button>
           <button class="nav-link" data-section="catchup">Catch Me Up</button>
+          <button class="nav-link" data-section="security">Security Lab</button>
         </nav>
         <div class="sidebar-footer sidebar-clock-panel">
           <p class="mini-label">Local time</p>
@@ -244,9 +245,9 @@
               Day
               <select id="meetingDaySelect"></select>
             </label>
-            <button type="button" class="small-btn meeting-edit-toggle" id="toggleFreeSlotsBtn">Mark your free slots</button>
+            <button type="button" class="small-btn meeting-edit-toggle" id="toggleFreeSlotsBtn">Choose your free slots</button>
           </div>
-          <p id="meetingEditHint" class="meeting-edit-hint">Turn this on, then click cells in your row to add or remove free slots.</p>
+          <p id="meetingEditHint" class="meeting-edit-hint">Open the picker to choose the hours when you are free for the selected day.</p>
           <div id="availabilityGrid" class="availability-grid"></div>
           <div class="legend">
             <span><i class="legend-box selected"></i> Selected by member</span>
@@ -265,11 +266,13 @@
             <div id="scheduledCalls" class="call-list"></div>
 
             <form id="callForm" class="stack-form">
-              <h4>Schedule a new call</h4>
-              <input id="callTitle" type="text" placeholder="Call title" required />
+              <h4>Start a team call</h4>
+              <input id="callTitle" type="text" placeholder="Meeting topic" required />
               <input id="callDate" type="date" required />
               <input id="callTime" type="time" required />
-              <button class="primary-btn" type="submit">Add to calendar</button>
+              <p id="callParticipantsNote" class="muted">Everyone in the current team will be included automatically.</p>
+              <button class="primary-btn" type="submit">Start call</button>
+              <p id="callFormFeedback" class="feedback-text login-feedback" role="alert"></p>
             </form>
           </div>
 
@@ -364,6 +367,44 @@
         </div>
       </section>
 
+      <section id="security" class="section">
+        <div class="grid two-col">
+          <div class="card">
+            <div class="card-header">
+              <h3>Message interception demo</h3>
+              <span class="badge" id="securityEncryptionBadge">Secure mode</span>
+            </div>
+            <p class="muted">Temporarily disable chat encryption for the next message, then inspect the raw database fields for the latest group message.</p>
+            <div class="stack-form">
+              <button type="button" class="danger-btn" id="toggleInsecureChatBtn">Disable E2EE for next message</button>
+              <button type="button" class="secondary-btn" id="inspectLatestMessageBtn">Inspect latest message record</button>
+            </div>
+            <p id="securityMessageFeedback" class="feedback-text" role="status"></p>
+            <pre id="latestMessagePayload" class="security-output">No message inspected yet.</pre>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Brute-force / no rate limiting demo</h3>
+              <span class="badge" id="securityRateLimitBadge">Rate limit on</span>
+            </div>
+            <p class="muted">Run repeated incorrect sign-in attempts against the login endpoint and check whether the server slows or blocks them.</p>
+            <form id="securityAttackForm" class="stack-form">
+              <label class="stack-label">Target email
+                <input id="securityAttackEmail" type="email" placeholder="student@example.com" />
+              </label>
+              <label class="stack-label">Attempt count
+                <input id="securityAttackCount" type="number" min="3" max="20" value="8" />
+              </label>
+              <button type="button" class="danger-btn" id="toggleRateLimitBtn">Disable login rate limit</button>
+              <button type="submit" class="primary-btn">Run failed sign-in burst</button>
+            </form>
+            <p id="securityAttackFeedback" class="feedback-text" role="status"></p>
+            <div id="securityAttackResults" class="security-output security-results">No attack run yet.</div>
+          </div>
+        </div>
+      </section>
+
       <section id="members" class="section">
         <div class="card">
           <div class="card-header">
@@ -429,6 +470,24 @@
         <button class="primary-btn" type="submit">Add to group</button>
         <p id="addMemberFeedback" class="feedback-text login-feedback" role="alert"></p>
       </form>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="meetingSlotsModal">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3>Select your free slots</h3>
+        <button class="icon-btn" id="closeMeetingSlotsModal" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="stack-form">
+        <label class="stack-label">Day
+          <select id="meetingSlotsDaySelect"></select>
+        </label>
+        <div id="meetingSlotsPicker" class="meeting-slots-picker"></div>
+        <p class="muted">Choose every one-hour slot when you are available. The meeting grid will update after you save.</p>
+        <button class="primary-btn" type="button" id="saveMeetingSlotsBtn">Save availability</button>
+        <p id="meetingSlotsFeedback" class="feedback-text login-feedback" role="alert"></p>
+      </div>
     </div>
   </div>
 

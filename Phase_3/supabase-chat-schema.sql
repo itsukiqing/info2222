@@ -1,3 +1,42 @@
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  username text unique,
+  email text unique not null,
+  full_name text,
+  role text default 'Team member',
+  password_hash text,
+  password_salt text,
+  password_iterations integer,
+  password_algorithm text default 'argon2id',
+  public_key_jwk jsonb,
+  encrypted_private_key text,
+  private_key_iv text,
+  private_key_salt text,
+  private_key_iterations integer,
+  created_at timestamptz default now()
+);
+
+alter table public.profiles add column if not exists password_hash text;
+alter table public.profiles add column if not exists password_salt text;
+alter table public.profiles add column if not exists password_iterations integer;
+alter table public.profiles add column if not exists password_algorithm text default 'argon2id';
+alter table public.profiles add column if not exists public_key_jwk jsonb;
+alter table public.profiles add column if not exists encrypted_private_key text;
+alter table public.profiles add column if not exists private_key_iv text;
+alter table public.profiles add column if not exists private_key_salt text;
+alter table public.profiles add column if not exists private_key_iterations integer;
+
+create table if not exists public.app_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists app_sessions_user_id_idx
+on public.app_sessions(user_id);
+
 create table if not exists public.chat_groups (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -32,8 +71,29 @@ create table if not exists public.chat_messages (
   sender_id uuid not null references auth.users(id) on delete cascade,
   sender_name text not null,
   body text not null,
+  body_ciphertext text,
+  body_iv text,
+  body_version integer default 1,
   created_at timestamptz not null default now()
 );
+
+alter table public.chat_messages alter column body drop not null;
+alter table public.chat_messages add column if not exists body_ciphertext text;
+alter table public.chat_messages add column if not exists body_iv text;
+alter table public.chat_messages add column if not exists body_version integer default 1;
+
+create table if not exists public.chat_group_keys (
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  encrypted_group_key text not null,
+  encrypted_group_key_iv text not null,
+  key_version integer not null default 1,
+  created_at timestamptz not null default now(),
+  primary key (group_id, user_id, key_version)
+);
+
+alter table public.chat_group_keys drop constraint if exists chat_group_keys_pkey;
+alter table public.chat_group_keys add primary key (group_id, user_id, key_version);
 
 create table if not exists public.chat_group_member_profiles (
   group_id uuid not null references public.chat_groups(id) on delete cascade,
@@ -722,3 +782,243 @@ end;
 $$;
 
 grant execute on function public.add_chat_group_member_by_email(uuid, text) to authenticated;
+
+create table if not exists public.chat_group_calls (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  topic text not null,
+  scheduled_date date not null,
+  scheduled_time time not null,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  generated_questions text[] not null default '{}'::text[],
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.chat_group_call_participants (
+  call_id uuid not null references public.chat_group_calls(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now(),
+  primary key (call_id, user_id)
+);
+
+create index if not exists chat_group_calls_group_id_idx
+on public.chat_group_calls(group_id, scheduled_date, scheduled_time);
+
+create index if not exists chat_group_call_participants_call_id_idx
+on public.chat_group_call_participants(call_id);
+
+alter table public.chat_group_calls enable row level security;
+alter table public.chat_group_call_participants enable row level security;
+
+drop policy if exists "Members can read chat group calls" on public.chat_group_calls;
+drop policy if exists "Members can create chat group calls" on public.chat_group_calls;
+drop policy if exists "Members can read chat group call participants" on public.chat_group_call_participants;
+
+create policy "Members can read chat group calls"
+on public.chat_group_calls
+for select
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()));
+
+create policy "Members can create chat group calls"
+on public.chat_group_calls
+for insert
+to authenticated
+with check (
+  created_by = auth.uid()
+  and public.is_chat_group_member(group_id, auth.uid())
+);
+
+create policy "Members can read chat group call participants"
+on public.chat_group_call_participants
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.chat_group_calls
+    where chat_group_calls.id = chat_group_call_participants.call_id
+      and public.is_chat_group_member(chat_group_calls.group_id, auth.uid())
+  )
+);
+
+create or replace function public.get_chat_group_calls(target_group_id uuid)
+returns table(
+  call_id uuid,
+  group_id uuid,
+  topic text,
+  scheduled_date date,
+  scheduled_time time,
+  created_by uuid,
+  created_at timestamptz,
+  generated_questions text[],
+  participant_count integer,
+  participant_names text[]
+)
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select
+    calls.id as call_id,
+    calls.group_id,
+    calls.topic,
+    calls.scheduled_date,
+    calls.scheduled_time,
+    calls.created_by,
+    calls.created_at,
+    calls.generated_questions,
+    count(participants.user_id)::integer as participant_count,
+    coalesce(
+      array_agg(distinct coalesce(profiles.full_name, profiles.username, profiles.email))
+        filter (where participants.user_id is not null),
+      '{}'::text[]
+    ) as participant_names
+  from public.chat_group_calls as calls
+  left join public.chat_group_call_participants as participants
+    on participants.call_id = calls.id
+  left join public.profiles as profiles
+    on profiles.id = participants.user_id
+  where calls.group_id = target_group_id
+    and public.is_chat_group_member(target_group_id, auth.uid())
+  group by calls.id
+  order by calls.scheduled_date desc, calls.scheduled_time desc, calls.created_at desc;
+$$;
+
+grant execute on function public.get_chat_group_calls(uuid) to authenticated;
+
+drop function if exists public.create_chat_group_call(uuid, text, date, time, text[]);
+
+create function public.create_chat_group_call(
+  p_group_id uuid,
+  p_call_topic text,
+  p_call_date date,
+  p_call_time time,
+  p_generated_questions text[]
+)
+returns table(
+  call_id uuid,
+  group_id uuid,
+  topic text,
+  scheduled_date date,
+  scheduled_time time,
+  created_by uuid,
+  created_at timestamptz,
+  generated_questions text[],
+  participant_count integer,
+  participant_names text[]
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  acting_user_id uuid;
+  new_call_id uuid;
+  saved_call record;
+begin
+  acting_user_id := auth.uid();
+
+  if acting_user_id is null then
+    raise exception 'You must be signed in to start a call';
+  end if;
+
+  if not public.is_chat_group_member(p_group_id, acting_user_id) then
+    raise exception 'You are not a member of this team';
+  end if;
+
+  insert into public.chat_group_calls (
+    group_id,
+    topic,
+    scheduled_date,
+    scheduled_time,
+    created_by,
+    generated_questions
+  )
+  values (
+    p_group_id,
+    p_call_topic,
+    p_call_date,
+    p_call_time,
+    acting_user_id,
+    coalesce(p_generated_questions, '{}'::text[])
+  )
+  returning id into new_call_id;
+
+  insert into public.chat_group_call_participants (call_id, user_id)
+  select new_call_id, memberships.user_id
+  from public.chat_group_members as memberships
+  where memberships.group_id = p_group_id
+  on conflict do nothing;
+
+  select c.*
+  into saved_call
+  from public.get_chat_group_calls(p_group_id) as c
+  where c.call_id = new_call_id
+  limit 1;
+
+  if saved_call is null then
+    return;
+  end if;
+
+  call_id := saved_call.call_id;
+  group_id := saved_call.group_id;
+  topic := saved_call.topic;
+  scheduled_date := saved_call.scheduled_date;
+  scheduled_time := saved_call.scheduled_time;
+  created_by := saved_call.created_by;
+  created_at := saved_call.created_at;
+  generated_questions := saved_call.generated_questions;
+  participant_count := saved_call.participant_count;
+  participant_names := saved_call.participant_names;
+
+  return next;
+end;
+$$;
+
+grant execute on function public.create_chat_group_call(uuid, text, date, time, text[]) to authenticated;
+
+create table if not exists public.chat_group_tasks (
+  id uuid primary key default gen_random_uuid(),
+  group_id uuid not null references public.chat_groups(id) on delete cascade,
+  title text not null,
+  assignee_name text not null default 'N/A',
+  assignee_user_id uuid references auth.users(id) on delete set null,
+  priority_rank integer not null default 3 check (priority_rank between 1 and 4),
+  duration_days integer not null default 1 check (duration_days >= 1),
+  status text not null default 'Not Started',
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists chat_group_tasks_group_id_idx
+on public.chat_group_tasks(group_id, priority_rank, created_at);
+
+alter table public.chat_group_tasks enable row level security;
+
+drop policy if exists "Members can read chat group tasks" on public.chat_group_tasks;
+drop policy if exists "Members can create chat group tasks" on public.chat_group_tasks;
+drop policy if exists "Members can update chat group tasks" on public.chat_group_tasks;
+
+create policy "Members can read chat group tasks"
+on public.chat_group_tasks
+for select
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()));
+
+create policy "Members can create chat group tasks"
+on public.chat_group_tasks
+for insert
+to authenticated
+with check (
+  created_by = auth.uid()
+  and public.is_chat_group_member(group_id, auth.uid())
+);
+
+create policy "Members can update chat group tasks"
+on public.chat_group_tasks
+for update
+to authenticated
+using (public.is_chat_group_member(group_id, auth.uid()))
+with check (public.is_chat_group_member(group_id, auth.uid()));

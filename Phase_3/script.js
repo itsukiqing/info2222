@@ -72,15 +72,39 @@ const appData = {
     { name: 'Daniel', dueWeekday: 6 }
   ],
   scheduledCalls: [
-    { id: 1, title: 'Weekly stand-up', date: '2026-04-03', time: '16:00' },
-    { id: 2, title: 'Prototype review', date: '2026-04-06', time: '18:00' }
+    {
+      id: 1,
+      groupId: 1,
+      title: 'Weekly stand-up',
+      date: '2026-04-03',
+      time: '16:00',
+      participantNames: ['Ava', 'Ben'],
+      generatedQuestions: [
+        'What changed since the last check-in?',
+        'What is blocking progress right now?',
+        'What needs to be finished before the next demo?'
+      ]
+    },
+    {
+      id: 2,
+      groupId: 2,
+      title: 'Prototype review',
+      date: '2026-04-06',
+      time: '18:00',
+      participantNames: ['Chloe', 'Daniel'],
+      generatedQuestions: [
+        'Which part of the prototype feels strongest for the demo?',
+        'What feedback needs to be folded in next?',
+        'Who owns the next revision?'
+      ]
+    }
   ],
   tasks: [
-    { id: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
-    { id: 2, title: 'Testing', assignee: 'Ben', priorityRank: 2, durationDays: 3, status: 'In Progress' },
-    { id: 3, title: 'Building Framework', assignee: 'Chloe', priorityRank: 3, durationDays: 2, status: 'Not Started' },
-    { id: 4, title: 'Marketing', assignee: 'N/A', priorityRank: 4, durationDays: 2, status: 'Not Assigned' },
-    { id: 5, title: 'Task panel polish', assignee: 'Ben', priorityRank: 4, durationDays: 1, status: 'In Progress' }
+    { id: 1, groupId: 1, title: 'Coding', assignee: 'Ava', priorityRank: 1, durationDays: 5, status: 'Done' },
+    { id: 2, groupId: 1, title: 'Testing', assignee: 'Ben', priorityRank: 2, durationDays: 3, status: 'In Progress' },
+    { id: 3, groupId: 1, title: 'Building Framework', assignee: 'Ava', priorityRank: 3, durationDays: 2, status: 'Not Started' },
+    { id: 4, groupId: 2, title: 'Marketing', assignee: 'N/A', priorityRank: 4, durationDays: 2, status: 'Not Assigned' },
+    { id: 5, groupId: 2, title: 'Task panel polish', assignee: 'Ben', priorityRank: 4, durationDays: 1, status: 'In Progress' }
   ],
   availability: {
     Wednesday: {
@@ -106,6 +130,7 @@ const appData = {
 
 const AUTH_STORAGE_KEY = 'unigroupHubCurrentUser';
 const DEMO_USERS_STORAGE_KEY = 'unigroupHubDemoUsers';
+const PRIVATE_KEY_SESSION_STORAGE_KEY = 'unigroupHubPrivateKeyJwk';
 const SUPABASE_PLACEHOLDER_URL = 'https://YOUR_PROJECT_ID.supabase.co';
 const SUPABASE_PLACEHOLDER_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 const SUPABASE_AUTH_TIMEOUT_MS = 12000;
@@ -128,6 +153,8 @@ let activeSection = 'dashboard';
 let activeGroupId = 1;
 let activeChannelId = 'general';
 let currentUser = null;
+let unlockedPrivateKey = null;
+const decryptedGroupKeys = new Map();
 let supabaseClient = null;
 let authMode = 'demo';
 let authFormMode = 'login';
@@ -150,6 +177,17 @@ let teamMembersError = '';
 let loadedTeamMembersGroupId = null;
 let meetingAvailability = {};
 let meetingAvailabilityLoading = false;
+let groupCalls = [];
+let callsLoading = false;
+let callsError = '';
+let loadedCallsGroupId = null;
+let selectedCallId = null;
+let groupTasks = [];
+let tasksLoading = false;
+let tasksError = '';
+let loadedTasksGroupId = null;
+let catchupLoading = false;
+let catchupError = '';
 
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Done', 'Not Assigned'];
 const MEMBER_STAGES = ['Not set', 'To Do', 'In Progress', 'Review', 'Done'];
@@ -161,7 +199,18 @@ let checklistStatusFilter = null;
 let checklistFilterMenuOpen = false;
 let meetingEditMode = false;
 let activeChatUtility = 'chat';
+let securityDemoDisableEncryptionForNextMessage = false;
+let securityLatestMessagePayload = 'No message inspected yet.';
+let securityAttackSummary = 'No attack run yet.';
+let securityRateLimitState = {
+  disabled: false,
+  maxAttempts: 5,
+  windowMs: 60000
+};
 const MEETING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const groupKeyCacheKey = (groupId, version) => `${String(groupId)}:${Number(version || 1)}`;
 
 const sectionsMeta = {
   dashboard: ['Dashboard', 'Overview of members, workload, and current progress.'],
@@ -171,7 +220,8 @@ const sectionsMeta = {
   meeting: ['Meeting Decider', 'Compare free slots and confirm the best group meeting time.'],
   calls: ['Initialiser', 'Initialise calls, reminders, and calendar-based meeting setup.'],
   checklist: ['To-Do List', 'Priority, duration, status, sort, and filter.'],
-  catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.']
+  catchup: ['Catch Me Up', 'Summarise recent updates relevant to a selected member.'],
+  security: ['Security Lab', 'Controlled demonstrations of vulnerabilities caused by missing or misconfigured security measures.']
 };
 
 const timeSlots = ['9-10', '10-11', '11-12', '12-1', '1-2', '2-3', '3-4', '4-5'];
@@ -181,6 +231,302 @@ function $(selector) {
 }
 function $all(selector) {
   return [...document.querySelectorAll(selector)];
+}
+
+function isLocalBrowserHost() {
+  return ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+}
+
+function isBrowserSecureForCredentials() {
+  return window.location.protocol === 'https:' || isLocalBrowserHost();
+}
+
+function getSecureTransportWarning() {
+  return 'Use HTTPS to sign in or register. Your browser must validate the server certificate before sending credentials.';
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    credentials: 'same-origin',
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Request failed.');
+  }
+  return payload;
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  array.forEach(byte => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ''));
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function parseStoredJwk(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return null;
+  }
+}
+
+function cachePrivateKeyJwk(jwk) {
+  sessionStorage.setItem(PRIVATE_KEY_SESSION_STORAGE_KEY, JSON.stringify(jwk));
+}
+
+async function importCachedPrivateKey() {
+  const stored = sessionStorage.getItem(PRIVATE_KEY_SESSION_STORAGE_KEY);
+  const jwk = parseStoredJwk(stored);
+  if (!jwk) return null;
+  return crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt']
+  );
+}
+
+function clearClientCryptoState() {
+  unlockedPrivateKey = null;
+  decryptedGroupKeys.clear();
+  sessionStorage.removeItem(PRIVATE_KEY_SESSION_STORAGE_KEY);
+}
+
+async function deriveWrappingKey(password, saltBase64, iterations) {
+  const passwordKey = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: base64ToBytes(saltBase64),
+      iterations: Number(iterations || 310000),
+      hash: 'SHA-256'
+    },
+    passwordKey,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function createIdentityKeyMaterial(password) {
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: 'RSA-OAEP',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256'
+    },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  const privateKeyPkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrappingKey = await deriveWrappingKey(password, bytesToBase64(salt), 310000);
+  const encryptedPrivateKey = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    wrappingKey,
+    privateKeyPkcs8
+  );
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  cachePrivateKeyJwk(privateKeyJwk);
+  unlockedPrivateKey = keyPair.privateKey;
+  return {
+    publicKeyJwk,
+    encryptedPrivateKey: bytesToBase64(encryptedPrivateKey),
+    privateKeyIv: bytesToBase64(iv),
+    privateKeySalt: bytesToBase64(salt),
+    privateKeyIterations: 310000
+  };
+}
+
+async function unlockIdentityKey(user, password = '') {
+  if (!user?.crypto) return null;
+  if (unlockedPrivateKey) return unlockedPrivateKey;
+
+  const cachedKey = await importCachedPrivateKey();
+  if (cachedKey) {
+    unlockedPrivateKey = cachedKey;
+    return unlockedPrivateKey;
+  }
+
+  if (!password) {
+    throw new Error('Your encrypted message key is locked. Please sign in again.');
+  }
+
+  const wrappingKey = await deriveWrappingKey(password, user.crypto.privateKeySalt, user.crypto.privateKeyIterations);
+  const decryptedPkcs8 = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(user.crypto.privateKeyIv) },
+    wrappingKey,
+    base64ToBytes(user.crypto.encryptedPrivateKey)
+  );
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    decryptedPkcs8,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['decrypt']
+  );
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', privateKey);
+  cachePrivateKeyJwk(privateKeyJwk);
+  unlockedPrivateKey = privateKey;
+  return privateKey;
+}
+
+async function importMemberPublicKey(member) {
+  const jwk = parseStoredJwk(member?.publicKeyJwk || member?.public_key_jwk || member?.crypto?.publicKeyJwk);
+  if (!jwk) {
+    throw new Error(`Missing public key for ${member?.full_name || member?.name || member?.email || 'that member'}.`);
+  }
+  return crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    true,
+    ['encrypt']
+  );
+}
+
+function cacheGroupKey(groupId, version, key) {
+  decryptedGroupKeys.set(groupKeyCacheKey(groupId, version), key);
+}
+
+function getLatestGroupKeyVersion(group) {
+  const envelopes = group?.keyEnvelopes || [];
+  if (!envelopes.length) return 1;
+  return envelopes.reduce((maxVersion, envelope) => Math.max(maxVersion, Number(envelope.version || 1)), 1);
+}
+
+async function buildGroupKeyEnvelopesForMembers(members, keyVersion = 1) {
+  const groupKey = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  const rawGroupKey = await crypto.subtle.exportKey('raw', groupKey);
+  const uniqueMembers = [...new Map(members.map(member => [String(member.id), member])).values()];
+  const keyEnvelopes = await Promise.all(uniqueMembers.map(async member => {
+    const publicKey = await importMemberPublicKey(member);
+    const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
+    return {
+      userId: member.id,
+      encryptedKey: bytesToBase64(wrapped),
+      iv: 'rsa-oaep',
+      version: keyVersion
+    };
+  }));
+  return { groupKey, keyVersion, keyEnvelopes };
+}
+
+async function getGroupKey(group, requestedVersion = null) {
+  const groupId = group?.id || group;
+  if (!groupId) throw new Error('No group selected.');
+  const groupObject = typeof group === 'object' ? group : getActiveGroup();
+  const version = Number(requestedVersion || getLatestGroupKeyVersion(groupObject) || 1);
+  const cachedKey = decryptedGroupKeys.get(groupKeyCacheKey(groupId, version));
+  if (cachedKey) return cachedKey;
+  const envelope = (groupObject?.keyEnvelopes || []).find(candidate => Number(candidate.version || 1) === version);
+  if (!envelope?.encryptedKey) {
+    throw new Error(`This team does not have the encrypted group key for version ${version}.`);
+  }
+  const privateKey = await unlockIdentityKey(currentUser);
+  if (!privateKey) {
+    throw new Error('Your encrypted message key is unavailable.');
+  }
+  const rawGroupKey = await crypto.subtle.decrypt(
+    { name: 'RSA-OAEP' },
+    privateKey,
+    base64ToBytes(envelope.encryptedKey)
+  );
+  const groupKey = await crypto.subtle.importKey(
+    'raw',
+    rawGroupKey,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+  cacheGroupKey(groupId, version, groupKey);
+  return groupKey;
+}
+
+async function createGroupKeyEnvelopeForMember(group, member) {
+  const version = getLatestGroupKeyVersion(group);
+  const groupKey = await getGroupKey(group, version);
+  const rawGroupKey = await crypto.subtle.exportKey('raw', groupKey);
+  const publicKey = await importMemberPublicKey(member);
+  const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, publicKey, rawGroupKey);
+  return {
+    encryptedKey: bytesToBase64(wrapped),
+    iv: 'rsa-oaep',
+    version
+  };
+}
+
+async function encryptChatTextForGroup(group, text) {
+  const version = getLatestGroupKeyVersion(group);
+  const groupKey = await getGroupKey(group, version);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    groupKey,
+    textEncoder.encode(text)
+  );
+  return {
+    ciphertext: bytesToBase64(ciphertext),
+    iv: bytesToBase64(iv),
+    version
+  };
+}
+
+async function decryptChatTextForGroup(group, message) {
+  if (message.text && !message.ciphertext) return message.text;
+  if (!message.ciphertext) return '';
+  try {
+    const groupKey = await getGroupKey(group, message.version);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: base64ToBytes(message.iv) },
+      groupKey,
+      base64ToBytes(message.ciphertext)
+    );
+    return textDecoder.decode(plaintext);
+  } catch (error) {
+    return '[Encrypted message unavailable]';
+  }
+}
+
+async function performBackendAction(action, payload = {}) {
+  return apiRequest('/api/app-action', {
+    method: 'POST',
+    body: {
+      action,
+      ...payload
+    }
+  });
 }
 
 async function init() {
@@ -196,6 +542,7 @@ async function init() {
   bindTasks();
   bindChecklistControls();
   bindCatchup();
+  bindSecurityLab();
   bindGroupModal();
   bindAddMemberModal();
   bindMembersDirectory();
@@ -211,6 +558,7 @@ function renderAll() {
   renderCalls();
   renderTasks();
   renderCatchupHighlights();
+  renderSecurityLab();
 }
 
 function navigateToSection(section) {
@@ -227,6 +575,11 @@ function bindAuth() {
     e.preventDefault();
     const email = $('#loginEmail').value.trim().toLowerCase();
     const password = $('#loginPassword').value;
+
+    if (supabaseClient && !isBrowserSecureForCredentials()) {
+      $('#loginFeedback').textContent = getSecureTransportWarning();
+      return;
+    }
 
     if (authFormMode === 'register') {
       const registrationEmail = $('#registerEmail').value.trim().toLowerCase();
@@ -263,8 +616,9 @@ function bindAuth() {
 
   $('#logoutBtn').addEventListener('click', async () => {
     if (supabaseClient) {
-      const { error } = await supabaseClient.auth.signOut();
-      if (error) {
+      try {
+        await apiRequest('/api/auth/logout', { method: 'POST' });
+      } catch (error) {
         $('#loginFeedback').textContent = error.message;
         return;
       }
@@ -272,6 +626,7 @@ function bindAuth() {
 
     currentUser = null;
     localStorage.removeItem(AUTH_STORAGE_KEY);
+    clearClientCryptoState();
     teardownDatabaseChat();
     teamMembers = [];
     teamMembersError = '';
@@ -290,6 +645,101 @@ function bindAuth() {
   });
 }
 
+async function mapBackendStateGroup(group) {
+  const mappedGroup = {
+    id: group.id,
+    name: group.name,
+    createdBy: group.createdBy || null,
+    leaderId: group.leaderId || group.createdBy || null,
+    keyEnvelopes: Array.isArray(group.keyEnvelopes) ? group.keyEnvelopes : [],
+    channels: [],
+    members: (group.members || []).map(normalizeTeamMember),
+    availability: group.availability || createEmptyMeetingAvailability((group.members || []).map(member => member.full_name || member.name || member.username || member.email)),
+    calls: (group.calls || []).map(normalizeCallRecord),
+    tasks: (group.tasks || []).map(normalizeTaskRecord)
+  };
+
+  mappedGroup.channels = await Promise.all((group.channels || []).map(async channel => ({
+    id: channel.id,
+    name: channel.name,
+    messages: await Promise.all((channel.messages || []).map(async message => ({
+      id: message.id,
+      senderId: message.senderId || null,
+      sender: message.sender || 'Unknown',
+      ciphertext: message.ciphertext || '',
+      iv: message.iv || '',
+      version: Number(message.version || 1),
+      text: await decryptChatTextForGroup(mappedGroup, message),
+      time: message.time || formatChatTimestamp(message.createdAt),
+      date: message.date || (message.createdAt || '').slice(0, 10),
+      createdAt: message.createdAt || ''
+    })))
+  })));
+
+  return mappedGroup;
+}
+
+function syncDerivedStateFromActiveGroup() {
+  const activeGroup = getActiveGroup();
+  const members = activeGroup?.members || [];
+  teamMembers = members.map(normalizeTeamMember);
+  teamMembersLoading = false;
+  teamMembersError = '';
+  loadedTeamMembersGroupId = activeGroup?.id || null;
+
+  groupCalls = (activeGroup?.calls || []).map(normalizeCallRecord);
+  callsLoading = false;
+  callsError = '';
+  loadedCallsGroupId = activeGroup?.id || null;
+
+  groupTasks = (activeGroup?.tasks || []).map(normalizeTaskRecord);
+  tasksLoading = false;
+  tasksError = '';
+  loadedTasksGroupId = activeGroup?.id || null;
+
+  syncMeetingAvailabilityMembers();
+  if (activeGroup?.availability) {
+    meetingAvailability = activeGroup.availability;
+  } else if (!supabaseClient) {
+    Object.entries(appData.availability).forEach(([day, membersByDay]) => {
+      if (!meetingAvailability[day]) return;
+      Object.entries(membersByDay).forEach(([name, slots]) => {
+        if (meetingAvailability[day][name]) {
+          meetingAvailability[day][name] = [...slots];
+        }
+      });
+    });
+  }
+  meetingAvailabilityLoading = false;
+}
+
+async function loadBackendState() {
+  if (!supabaseClient || !currentUser) return;
+
+  chatLoading = true;
+  chatLoadError = '';
+  renderChat();
+
+  try {
+    const payload = await apiRequest('/api/app-state');
+    currentUser = payload.user || currentUser;
+    availableChatMembers = (payload.memberDirectory || []).map(member => ({
+      ...member,
+      publicKeyJwk: member.public_key_jwk || member.publicKeyJwk || null
+    }));
+    appData.groups = await Promise.all((payload.groups || []).map(mapBackendStateGroup));
+    ensureActiveChatSelection();
+    syncDerivedStateFromActiveGroup();
+    renderGroupMemberPicker();
+  } catch (error) {
+    chatLoadError = error.message || 'Could not load app data.';
+  } finally {
+    chatLoading = false;
+    renderAll();
+    renderChat();
+  }
+}
+
 function initSupabaseClient() {
   const config = window.UNIGROUP_SUPABASE_CONFIG || {};
   const hasRealConfig =
@@ -298,71 +748,33 @@ function initSupabaseClient() {
     config.url !== SUPABASE_PLACEHOLDER_URL &&
     config.anonKey !== SUPABASE_PLACEHOLDER_ANON_KEY;
 
-  if (!hasRealConfig || !window.supabase) {
+  if (!hasRealConfig) {
     authMode = 'demo';
     return;
   }
 
-  supabaseClient = window.supabase.createClient(config.url, config.anonKey);
-  authMode = 'supabase';
-  supabaseClient.auth.onAuthStateChange((_event, session) => {
-    console.debug(`[auth] state changed: ${_event}`);
-
-    window.setTimeout(async () => {
-      const profile = session ? await getProfileForUserId(session.user.id) : null;
-      currentUser = getUserFromSupabaseSession(session, profile);
-      if (currentUser) initDatabaseChat();
-      else teardownDatabaseChat();
-      renderChat();
-      syncAuthView();
-    }, 0);
-  });
+  supabaseClient = { customBackend: true };
+  authMode = 'custom';
 }
 
 async function signInWithSupabase(email, password) {
   $('#loginFeedback').textContent = 'Signing in...';
-  let authTimerRunning = false;
-  let profileTimerRunning = false;
-
   try {
-    console.time('auth:signInWithPassword');
-    authTimerRunning = true;
-    const { data, error } = await withTimeout(
-      supabaseClient.auth.signInWithPassword({ email, password }),
+    const payload = await withTimeout(
+      apiRequest('/api/auth/login', {
+        method: 'POST',
+        body: { email, password }
+      }),
       SUPABASE_AUTH_TIMEOUT_MS,
-      'Sign in timed out. Check your internet connection and Supabase project settings.'
+      'Sign in timed out. Check your internet connection and backend settings.'
     );
-    console.timeEnd('auth:signInWithPassword');
-    authTimerRunning = false;
-
-    if (error) {
-      $('#loginFeedback').textContent = error.message;
-      return;
-    }
-
-    if (!data.session) {
-      $('#loginFeedback').textContent = 'Sign in did not return a session. Check Supabase Auth settings.';
-      return;
-    }
-
-    console.time('auth:profileFetch');
-    profileTimerRunning = true;
-    const profile = await withTimeout(
-      getProfileForUserId(data.session.user.id),
-      SUPABASE_AUTH_TIMEOUT_MS,
-      'Profile lookup timed out. Check the profiles table policy.'
-    );
-    console.timeEnd('auth:profileFetch');
-    profileTimerRunning = false;
-    currentUser = getUserFromSupabaseSession(data.session, profile);
+    currentUser = payload.user || null;
+    await unlockIdentityKey(currentUser, password);
     $('#loginForm').reset();
     $('#loginFeedback').textContent = '';
-    renderChat();
+    await loadBackendState();
     syncAuthView();
-    initDatabaseChat();
   } catch (error) {
-    if (authTimerRunning) console.timeEnd('auth:signInWithPassword');
-    if (profileTimerRunning) console.timeEnd('auth:profileFetch');
     $('#loginFeedback').textContent = error.message || 'Could not sign in.';
   }
 }
@@ -391,70 +803,30 @@ async function registerUser(email, password) {
 
 async function registerWithSupabase(email, password, username, fullName) {
   $('#loginFeedback').textContent = 'Creating account...';
-  const { data, error } = await supabaseClient.auth.signUp({
-    email,
-    password,
-    options: {
-      data: {
-        username,
-        full_name: fullName,
-        email
-      }
-    }
-  });
-
-  if (error) {
-    $('#loginFeedback').textContent = error.message;
-    return;
-  }
-
-  $('#loginForm').reset();
-
-  if (!data.session) {
-    $('#loginFeedback').textContent = 'Account created, but Supabase email confirmation is still enabled. Turn off Confirm email to auto-login after register.';
-    authFormMode = 'login';
-    syncAuthFormMode();
-    return;
-  }
-
-  const profileSaved = await saveSupabaseProfile(data.user.id, username, email, fullName);
-  if (!profileSaved) {
-    $('#loginFeedback').textContent = 'Account created, but the profile was not saved. Check the profiles table policies.';
-    return;
-  }
-
-  currentUser = getUserFromSupabaseSession(data.session, {
-    id: data.user.id,
-    username,
-    email,
-    full_name: fullName,
-    role: 'Team member'
-  });
-  $('#loginFeedback').textContent = '';
-  renderChat();
-  syncAuthView();
-  initDatabaseChat();
-}
-
-async function saveSupabaseProfile(id, username, email, fullName) {
-  const { error } = await supabaseClient
-    .from('profiles')
-    .upsert(
-      {
-        id,
-        username,
+  try {
+    const keyMaterial = await createIdentityKeyMaterial(password);
+    const payload = await apiRequest('/api/auth/register', {
+      method: 'POST',
+      body: {
         email,
-        full_name: fullName
-      },
-      { onConflict: 'id' }
-    );
-
-  if (error) {
-    console.warn('Could not save profile after signup:', error.message);
-    return false;
+        password,
+        username,
+        fullName,
+        publicKeyJwk: keyMaterial.publicKeyJwk,
+        encryptedPrivateKey: keyMaterial.encryptedPrivateKey,
+        privateKeyIv: keyMaterial.privateKeyIv,
+        privateKeySalt: keyMaterial.privateKeySalt,
+        privateKeyIterations: keyMaterial.privateKeyIterations
+      }
+    });
+    currentUser = payload.user || null;
+    $('#loginForm').reset();
+    $('#loginFeedback').textContent = '';
+    await loadBackendState();
+    syncAuthView();
+  } catch (error) {
+    $('#loginFeedback').textContent = error.message || 'Could not create the account.';
   }
-
-  return true;
 }
 
 function registerDemoUser(email, password, username, fullName) {
@@ -502,10 +874,18 @@ function getDemoUsers() {
 
 async function restoreSession() {
   if (supabaseClient) {
-    const { data, error } = await supabaseClient.auth.getSession();
-    const profile = !error && data.session ? await getProfileForUserId(data.session.user.id) : null;
-    currentUser = error ? null : getUserFromSupabaseSession(data.session, profile);
-    if (currentUser) initDatabaseChat();
+    try {
+      const payload = await apiRequest('/api/auth/me');
+      currentUser = payload.user || null;
+      if (currentUser) {
+        await unlockIdentityKey(currentUser);
+        await loadBackendState();
+      }
+    } catch (error) {
+      await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => {});
+      clearClientCryptoState();
+      currentUser = null;
+    }
     return;
   }
 
@@ -519,36 +899,6 @@ async function restoreSession() {
     currentUser = null;
     localStorage.removeItem(AUTH_STORAGE_KEY);
   }
-}
-
-async function getProfileForUserId(id) {
-  const { data, error } = await supabaseClient
-    .from('profiles')
-    .select('id, username, email, full_name, role')
-    .eq('id', id)
-    .maybeSingle();
-
-  if (error) return null;
-  return data || null;
-}
-
-function getUserFromSupabaseSession(session, profile = null) {
-  if (!session || !session.user) return null;
-  const user = session.user;
-  const displayName =
-    profile?.full_name ||
-    user.user_metadata?.full_name ||
-    user.user_metadata?.name ||
-    user.email?.split('@')[0] ||
-    'Student';
-
-  return {
-    id: user.id,
-    username: profile?.username || user.user_metadata?.username || '',
-    name: displayName,
-    email: profile?.email || user.email || 'Signed in',
-    role: profile?.role || user.user_metadata?.role || 'Team member'
-  };
 }
 
 function syncAuthView() {
@@ -581,15 +931,22 @@ function syncAuthFormMode() {
   $('#registerEmail').required = isRegistering;
   $('#loginPassword').autocomplete = isRegistering ? 'new-password' : 'current-password';
   $('#loginPassword').placeholder = isRegistering ? 'Create a password' : 'Enter your password';
+  const blockSensitiveAuth = authMode === 'custom' && !isBrowserSecureForCredentials();
+  $('#authSubmitBtn').disabled = blockSensitiveAuth;
+  if (blockSensitiveAuth) {
+    $('#loginFeedback').textContent = getSecureTransportWarning();
+  } else if ($('#loginFeedback').textContent === getSecureTransportWarning()) {
+    $('#loginFeedback').textContent = '';
+  }
 }
 
 function syncAuthHint() {
   const hint = $('#authHint');
 
-  if (authMode === 'supabase') {
+  if (authMode === 'custom') {
     hint.innerHTML = `
-      <strong>Supabase Auth</strong>
-      <span>Log in or register with email and password.</span>
+      <strong>Custom auth</strong>
+      <span>Passwords are stored with Argon2id, sessions are server-side, and group messages are end-to-end encrypted in the browser. Sign-in is only allowed over HTTPS so the browser can validate the server certificate before sending credentials.</span>
     `;
     return;
   }
@@ -671,6 +1028,7 @@ function normalizeTeamMember(member) {
     username: member.username || '',
     name,
     email: member.email || '',
+    publicKeyJwk: member.public_key_jwk || member.publicKeyJwk || null,
     role: member.role || 'Team member',
     currentTask: member.current_task || member.currentTask || '',
     stage: member.stage || 'Not set',
@@ -685,6 +1043,131 @@ function normalizeTeamMember(member) {
 function getActiveTeamMembers() {
   if (supabaseClient) return teamMembers;
   return appData.members;
+}
+
+function normalizeCallRecord(call) {
+  return {
+    id: call.call_id || call.id,
+    groupId: call.group_id || call.groupId || null,
+    title: call.topic || call.title || 'Untitled call',
+    date: call.scheduled_date || call.date || '',
+    time: call.scheduled_time || call.time || '',
+    participantNames: Array.isArray(call.participant_names) ? call.participant_names : (call.participantNames || []),
+    generatedQuestions: Array.isArray(call.generated_questions) ? call.generated_questions : (call.generatedQuestions || []),
+    createdAt: call.created_at || call.createdAt || '',
+    createdBy: call.created_by || call.createdBy || null,
+    participantCount: Number(call.participant_count || call.participantNames?.length || 0)
+  };
+}
+
+function normalizeTaskRecord(task) {
+  return {
+    id: task.task_id || task.id,
+    groupId: task.group_id || task.groupId || null,
+    title: task.title || 'Untitled task',
+    assignee: task.assignee_name || task.assignee || 'N/A',
+    assigneeUserId: task.assignee_user_id || task.assigneeUserId || null,
+    priorityRank: Number(task.priority_rank || task.priorityRank || 3),
+    durationDays: Math.max(1, Number(task.duration_days || task.durationDays || 1)),
+    status: task.status || 'Not Started',
+    createdBy: task.created_by || task.createdBy || null,
+    createdAt: task.created_at || task.createdAt || ''
+  };
+}
+
+function getCallsForActiveGroup() {
+  const activeGroup = getActiveGroup();
+  if (!activeGroup) return [];
+  if (supabaseClient) return groupCalls;
+  return appData.scheduledCalls
+    .filter(call => String(call.groupId || activeGroup.id) === String(activeGroup.id))
+    .map(normalizeCallRecord);
+}
+
+function getTasksForGroup(group = getActiveGroup()) {
+  if (!group) return [];
+  if (supabaseClient) {
+    return loadedTasksGroupId === group.id ? groupTasks : [];
+  }
+  return appData.tasks
+    .filter(task => String(task.groupId || group.id) === String(group.id))
+    .map(normalizeTaskRecord);
+}
+
+function getTasksForActiveGroup() {
+  return getTasksForGroup(getActiveGroup());
+}
+
+function buildLocalCallQuestions(topic, participantNames = []) {
+  const teamLabel = participantNames.length ? participantNames.join(', ') : 'the team';
+  return [
+    `What does success for "${topic}" look like for ${teamLabel}?`,
+    `Which tasks or blockers should we resolve in this meeting?`,
+    'What needs an owner before the call ends?',
+    'What should happen next after this meeting?'
+  ];
+}
+
+async function generateCallQuestionsForTopic({ topic, groupName, participantNames, scheduledDate, scheduledTime }) {
+  const fallbackQuestions = buildLocalCallQuestions(topic, participantNames);
+
+  try {
+    const response = await fetch('/api/call-questions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        topic,
+        groupName,
+        participantNames,
+        scheduledDate,
+        scheduledTime
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Could not generate meeting questions.');
+    }
+
+    const questions = Array.isArray(payload?.questions)
+      ? payload.questions.map(question => String(question || '').trim()).filter(Boolean)
+      : [];
+
+    if (!questions.length) {
+      throw new Error('The AI question generator returned an empty list.');
+    }
+
+    return { questions, warning: '' };
+  } catch (error) {
+    return {
+      questions: fallbackQuestions,
+      warning: `${error.message || 'Could not use the AI question generator.'} Saved starter questions instead.`
+    };
+  }
+}
+
+async function loadGroupCallsForActiveGroup(force = false) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    groupCalls = [];
+    callsLoading = false;
+    callsError = '';
+    loadedCallsGroupId = activeGroup?.id || null;
+    renderCalls();
+    renderCatchupHighlights();
+    return;
+  }
+
+  if (force) {
+    await loadBackendState();
+    return;
+  }
+
+  syncDerivedStateFromActiveGroup();
+  renderCalls();
+  renderCatchupHighlights();
 }
 
 function getMentionHandleForMember(member) {
@@ -885,35 +1368,7 @@ async function loadMeetingAvailabilityForActiveGroup() {
     return;
   }
 
-  const activeGroup = getActiveGroup();
-  if (!activeGroup) {
-    renderMeeting();
-    return;
-  }
-
-  meetingAvailabilityLoading = true;
-  renderMeeting();
-
-  const { data, error } = await supabaseClient.rpc('get_chat_group_availability', {
-    target_group_id: activeGroup.id
-  });
-
-  if (!error) {
-    meetingAvailability = mapAvailabilityRowsToState(data);
-    meetingAvailabilityLoading = false;
-    renderMeeting();
-    return;
-  }
-
-  const { data: fallbackRows, error: fallbackError } = await supabaseClient
-    .from('chat_group_member_availability')
-    .select('user_id, day_name, slots')
-    .eq('group_id', activeGroup.id);
-
-  if (!fallbackError) {
-    meetingAvailability = mapAvailabilityRowsToState(fallbackRows);
-  }
-
+  syncDerivedStateFromActiveGroup();
   meetingAvailabilityLoading = false;
   renderMeeting();
 }
@@ -927,31 +1382,65 @@ async function saveCurrentUserAvailability(day, slots) {
 
   const activeGroup = getActiveGroup();
   if (!activeGroup) throw new Error('Select a team first.');
+  await performBackendAction('save_availability', {
+    groupId: activeGroup.id,
+    day,
+    slots
+  });
+  await loadBackendState();
+}
 
-  const payload = {
-    target_group_id: activeGroup.id,
-    target_day_name: day,
-    target_slots: slots
-  };
+function openMeetingSlotsModal() {
+  if (supabaseClient && !getActiveGroup()) {
+    $('#meetingFeedback').textContent = 'Select a team chat first to set your availability.';
+    return;
+  }
+  const currentDay = $('#meetingDaySelect').value || MEETING_DAYS[0];
+  $('#meetingSlotsDaySelect').innerHTML = MEETING_DAYS.map(day => `<option value="${day}">${day}</option>`).join('');
+  $('#meetingSlotsDaySelect').value = currentDay;
+  $('#meetingSlotsFeedback').textContent = '';
+  renderMeetingSlotsPicker();
+  $('#meetingSlotsModal').classList.remove('hidden');
+}
 
-  const { error } = await supabaseClient.rpc('upsert_my_chat_group_availability', payload);
-  if (!error) return;
+function closeMeetingSlotsModal() {
+  $('#meetingSlotsModal').classList.add('hidden');
+}
 
-  const { error: fallbackError } = await supabaseClient
-    .from('chat_group_member_availability')
-    .upsert({
-      group_id: activeGroup.id,
-      user_id: currentUser.id,
-      day_name: day,
-      slots,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'group_id,user_id,day_name' });
+function renderMeetingSlotsPicker() {
+  const day = $('#meetingSlotsDaySelect').value || MEETING_DAYS[0];
+  const editableMember = getEditableMeetingMemberName();
+  const selectedSlots = meetingAvailability[day]?.[editableMember] || [];
+  $('#meetingSlotsPicker').innerHTML = timeSlots.map(slot => `
+    <label class="meeting-slot-option">
+      <input type="checkbox" value="${slot}" ${selectedSlots.includes(slot) ? 'checked' : ''} />
+      <span>${slotToReadable(slot, true)}</span>
+    </label>
+  `).join('');
+}
 
-  if (fallbackError) {
-    if (String(error.message || '').includes('column reference "user_id" is ambiguous')) {
-      throw new Error('The meeting availability function in Supabase needs the latest SQL update. Re-run supabase-chat-schema.sql, then try again.');
-    }
-    throw fallbackError;
+async function saveMeetingSlotsFromModal() {
+  const day = $('#meetingSlotsDaySelect').value || MEETING_DAYS[0];
+  const editableMember = getEditableMeetingMemberName();
+  const nextSlots = [...$('#meetingSlotsPicker').querySelectorAll('input:checked')]
+    .map(input => input.value)
+    .sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
+
+  if (!meetingAvailability[day]) {
+    meetingAvailability[day] = {};
+  }
+  meetingAvailability[day][editableMember] = nextSlots;
+  $('#meetingSlotsFeedback').textContent = `Saving your availability for ${day}...`;
+  try {
+    await saveCurrentUserAvailability(day, nextSlots);
+    $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
+    $('#meetingSlotsFeedback').textContent = `Saved ${nextSlots.length ? nextSlots.map(slot => slotToReadable(slot, true)).join(', ') : 'no free slots'} for ${day}.`;
+    $('#meetingDaySelect').value = day;
+    renderMeeting();
+    closeMeetingSlotsModal();
+  } catch (error) {
+    $('#meetingSlotsFeedback').textContent = error.message || `Could not update your availability for ${day}.`;
+    renderMeeting();
   }
 }
 
@@ -970,52 +1459,25 @@ async function saveCurrentUserDeadline(deadline) {
   if (!activeGroup) {
     throw new Error('Select a team first.');
   }
-
-  const rpcPayload = {
-    p_group_id: activeGroup.id,
-    p_user_id: currentUser.id,
-    p_role: activeMember?.role || '',
-    p_current_task: activeMember?.currentTask || '',
-    p_stage: activeMember?.stage || 'Not set',
-    p_workload: activeMember?.workload || 'Not set',
-    p_deadline: normalizedDeadline
-  };
-
-  const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', rpcPayload);
-
-  if (error) {
-    const { error: fallbackError } = await supabaseClient
-      .from('chat_group_member_profiles')
-      .upsert({
-        group_id: activeGroup.id,
-        user_id: currentUser.id,
-        role: activeMember?.role || null,
-        current_task: activeMember?.currentTask || null,
-        stage: activeMember?.stage || 'Not set',
-        workload: activeMember?.workload || 'Not set',
-        deadline: normalizedDeadline,
-        updated_by: currentUser.id,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'group_id,user_id' });
-
-    if (fallbackError) {
-      throw error;
-    }
-
-    await loadTeamMembersForActiveGroup();
-    return;
-  }
-
-  const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
-  teamMembers = teamMembers.map(member => String(member.id) === String(currentUser.id) ? savedMember : member);
+  await performBackendAction('save_member_profile', {
+    groupId: activeGroup.id,
+    userId: currentUser.id,
+    role: activeMember?.role || '',
+    currentTask: activeMember?.currentTask || '',
+    stage: activeMember?.stage || 'Not set',
+    workload: activeMember?.workload || 'Not set',
+    deadline: normalizedDeadline
+  });
+  await loadBackendState();
 }
 
 function renderDashboard() {
   const members = getActiveTeamMembers();
   const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
 
   $('#statMembers').textContent = members.length;
-  $('#statTasks').textContent = appData.tasks.length;
+  $('#statTasks').textContent = tasks.length;
   $('#statMeetingTime').textContent = computeSuggestedMeeting().label;
 
   if (supabaseClient && !activeGroup) {
@@ -1047,13 +1509,13 @@ function renderDashboard() {
     `).join('');
   }
 
-  $('#taskSnapshot').innerHTML = appData.tasks.slice(0, 5).map(task => `
+  $('#taskSnapshot').innerHTML = tasks.slice(0, 5).map(task => `
     <div class="snapshot-item">
       <strong>${task.title}</strong>
       <p class="muted">${task.assignee} · ${task.status} · P${task.priorityRank}</p>
       <small>Duration: ${task.durationDays} days</small>
     </div>
-  `).join('');
+  `).join('') || '<p class="muted">No tasks yet for this team.</p>';
 }
 
 function renderMembersDirectory() {
@@ -1144,14 +1606,10 @@ async function initDatabaseChat() {
   if (!supabaseClient || !currentUser) return;
   if (chatInitInProgress) return;
   chatInitInProgress = true;
-  console.time('chat:init');
   try {
-    await loadChatMemberDirectory();
-    await loadChatFromDatabase();
-    subscribeToChatChanges();
+    await loadBackendState();
   } finally {
     chatInitInProgress = false;
-    console.timeEnd('chat:init');
   }
 }
 
@@ -1162,83 +1620,19 @@ async function loadTeamMembersForActiveGroup() {
     teamMembersLoading = false;
     loadedTeamMembersGroupId = null;
     renderMemberDrivenViews();
+    renderCalls();
     loadMeetingAvailabilityForActiveGroup();
     return;
   }
 
-  const activeGroup = getActiveGroup();
-  if (!activeGroup) {
-    teamMembers = [];
-    teamMembersError = '';
-    teamMembersLoading = false;
-    loadedTeamMembersGroupId = null;
-    renderMemberDrivenViews();
-    loadMeetingAvailabilityForActiveGroup();
-    return;
-  }
-
-  teamMembersLoading = true;
-  teamMembersError = '';
-  loadedTeamMembersGroupId = activeGroup.id;
+  syncDerivedStateFromActiveGroup();
   renderMemberDrivenViews();
-
-  const { data, error } = await supabaseClient.rpc('get_chat_group_members', {
-    target_group_id: activeGroup.id
-  });
-
-  if (error) {
-    if (isMissingRpcError(error, 'get_chat_group_members')) {
-      try {
-        const fallbackMembers = await loadTeamMembersFromTables(activeGroup.id);
-        if (loadedTeamMembersGroupId !== activeGroup.id) return;
-        teamMembers = fallbackMembers;
-        teamMembersError = fallbackMembers.length
-          ? ''
-          : 'Team members RPC is not installed yet. Showing what could be read from the current tables.';
-        teamMembersLoading = false;
-        renderMemberDrivenViews();
-        return;
-      } catch (fallbackError) {
-        teamMembers = [];
-        teamMembersError = 'Team members RPC is missing in Supabase, and the fallback table query also failed.';
-        teamMembersLoading = false;
-        renderMemberDrivenViews();
-        return;
-      }
-    }
-
-    teamMembers = [];
-    teamMembersError = error.message || 'Could not load team members.';
-    teamMembersLoading = false;
-    renderMemberDrivenViews();
-    return;
-  }
-
-  if (loadedTeamMembersGroupId !== activeGroup.id) return;
-
-  teamMembers = (data || []).map(normalizeTeamMember);
-  teamMembersLoading = false;
-  teamMembersError = '';
-  renderMemberDrivenViews();
-  await loadMeetingAvailabilityForActiveGroup();
+  renderCalls();
+  renderMeeting();
 }
 
 async function loadChatMemberDirectory() {
   if (!supabaseClient || !currentUser) return;
-
-  const { data, error } = await supabaseClient
-    .from('profiles')
-    .select('id, username, full_name, email')
-    .order('full_name', { ascending: true });
-
-  if (error) {
-    console.warn('Could not load chat member directory:', error.message);
-    availableChatMembers = [];
-    renderGroupMemberPicker();
-    return;
-  }
-
-  availableChatMembers = data || [];
   renderGroupMemberPicker();
 }
 
@@ -1270,101 +1664,16 @@ function renderGroupMemberPicker() {
 }
 
 function teardownDatabaseChat() {
-  if (!supabaseClient || !chatSubscription) return;
-  supabaseClient.removeChannel(chatSubscription);
   chatSubscription = null;
 }
 
 function subscribeToChatChanges() {
-  if (!supabaseClient || chatSubscription) return;
-
-  const reloadChat = debounce(() => {
-    loadChatFromDatabase();
-  }, 250);
-
-  chatSubscription = supabaseClient
-    .channel('unigroup-chat-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_groups' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_members' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_group_member_profiles' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_channels' }, reloadChat)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, reloadChat)
-    .subscribe();
+  return;
 }
 
 async function loadChatFromDatabase() {
   if (!supabaseClient || !currentUser) return;
-
-  const loadVersion = ++chatLoadVersion;
-  chatLoading = true;
-  chatLoadError = '';
-  console.time('chat:loadFromDatabase');
-
-  try {
-    const { data: chatState, error: chatStateError } = await supabaseClient.rpc('get_my_chat_state');
-    if (chatStateError) throw chatStateError;
-
-    const groups = chatState?.groups || [];
-    const channels = chatState?.channels || [];
-    const messages = chatState?.messages || [];
-
-    if (!groups.length) {
-      if (loadVersion !== chatLoadVersion) return;
-      appData.groups = [];
-      activeGroupId = null;
-      activeChannelId = null;
-      await loadTeamMembersForActiveGroup();
-      return;
-    }
-
-    if (loadVersion !== chatLoadVersion) return;
-    appData.groups = mapChatRowsToGroups(groups, channels, messages);
-    ensureActiveChatSelection();
-    await loadTeamMembersForActiveGroup();
-  } catch (error) {
-    if (loadVersion !== chatLoadVersion) return;
-    chatLoadError = error.message || 'Could not load chat from Supabase.';
-    console.error('Chat load failed:', error);
-  } finally {
-    if (loadVersion !== chatLoadVersion) return;
-    chatLoading = false;
-    console.timeEnd('chat:loadFromDatabase');
-    renderChat();
-  }
-}
-
-function mapChatRowsToGroups(groups, channels, messages) {
-  const channelsByGroup = channels.reduce((acc, channel) => {
-    if (!acc[channel.group_id]) acc[channel.group_id] = [];
-    acc[channel.group_id].push(channel);
-    return acc;
-  }, {});
-
-  const messagesByChannel = messages.reduce((acc, message) => {
-    if (!acc[message.channel_id]) acc[message.channel_id] = [];
-    acc[message.channel_id].push(message);
-    return acc;
-  }, {});
-
-  return groups.map(group => ({
-    id: group.id,
-    name: group.name,
-    createdBy: group.created_by || null,
-    leaderId: group.leader_id || group.created_by || null,
-    channels: (channelsByGroup[group.id] || []).map(channel => ({
-      id: channel.id,
-      name: channel.name,
-      messages: (messagesByChannel[channel.id] || []).map(message => ({
-        id: message.id,
-        senderId: message.sender_id,
-        sender: message.sender_name,
-        text: message.body,
-        time: formatChatTimestamp(message.created_at),
-        date: message.created_at.slice(0, 10),
-        createdAt: message.created_at
-      }))
-    }))
-  }));
+  await loadBackendState();
 }
 
 function ensureActiveChatSelection() {
@@ -1781,8 +2090,13 @@ function renderChat() {
     btn.addEventListener('click', () => {
       activeGroupId = btn.dataset.groupId;
       activeChannelId = getActiveGroup()?.channels[0]?.id || null;
+      loadedCallsGroupId = null;
+      loadedTasksGroupId = null;
+      selectedCallId = null;
       renderChat();
       loadTeamMembersForActiveGroup();
+      loadGroupCallsForActiveGroup();
+      loadTasksForActiveGroup();
     });
   });
 }
@@ -1929,37 +2243,32 @@ function bindChat() {
         return;
       }
 
-      const { data: messageData, error } = await supabaseClient.rpc('send_chat_message', {
-        target_group_id: activeGroup.id,
-        target_channel_id: activeChannel.id,
-        message_body: text,
-        sender_display_name: currentUser.name
-      });
-
-      if (error) {
+      try {
+        const encryptedPayload = securityDemoDisableEncryptionForNextMessage
+          ? null
+          : await encryptChatTextForGroup(activeGroup, text);
+        await performBackendAction('send_message', {
+          groupId: activeGroup.id,
+          channelId: activeChannel.id,
+          ciphertext: encryptedPayload?.ciphertext || '',
+          iv: encryptedPayload?.iv || '',
+          version: encryptedPayload?.version || 0,
+          plaintextBody: securityDemoDisableEncryptionForNextMessage ? text : ''
+        });
+        if (securityDemoDisableEncryptionForNextMessage) {
+          securityDemoDisableEncryptionForNextMessage = false;
+          $('#securityMessageFeedback').textContent = 'One plaintext message was sent for the interception demo. Secure chat is back on.';
+          renderSecurityLab();
+        }
+      } catch (error) {
         chatLoadError = error.message;
         renderChat();
         return;
       }
-
-      const createdMessage = Array.isArray(messageData) ? messageData[0] : messageData;
-      chatLoadVersion += 1;
-      activeChannel.messages.push({
-        id: createdMessage?.message_id || `local-${Date.now()}`,
-        senderId: currentUser.id,
-        sender: currentUser.name,
-        text,
-        time: formatChatTimestamp(createdMessage?.created_at || new Date().toISOString()),
-        date: (createdMessage?.created_at || new Date().toISOString()).slice(0, 10),
-        createdAt: createdMessage?.created_at || new Date().toISOString(),
-        channelId: activeChannel.id,
-        channelName: activeChannel.name
-      });
       input.value = '';
       closeMentionSuggestions();
       chatLoadError = '';
-      renderChat();
-      loadChatFromDatabase();
+      await loadBackendState();
       return;
     }
 
@@ -2103,32 +2412,12 @@ function bindMeeting() {
   });
 
   $('#meetingDaySelect').addEventListener('change', renderAvailabilityGrid);
-  $('#toggleFreeSlotsBtn').addEventListener('click', () => {
-    meetingEditMode = !meetingEditMode;
-    syncMeetingEditState();
-    renderAvailabilityGrid();
-  });
-  $('#availabilityGrid').addEventListener('click', async e => {
-    const cell = e.target.closest('.availability-cell.editable-cell');
-    if (!cell || !meetingEditMode) return;
-
-    const day = $('#meetingDaySelect').value || MEETING_DAYS[0];
-    const slot = cell.dataset.slot;
-    const editableMember = getEditableMeetingMemberName();
-    const slots = meetingAvailability[day]?.[editableMember] || [];
-    const nextSlots = slots.includes(slot)
-      ? slots.filter(value => value !== slot)
-      : [...slots, slot].sort((a, b) => timeSlots.indexOf(a) - timeSlots.indexOf(b));
-
-    meetingAvailability[day][editableMember] = nextSlots;
-    $('#meetingFeedback').textContent = `Saving your availability for ${day}...`;
-    try {
-      await saveCurrentUserAvailability(day, nextSlots);
-      $('#meetingFeedback').textContent = `Updated your availability for ${day}.`;
-    } catch (error) {
-      $('#meetingFeedback').textContent = error.message || `Could not update your availability for ${day}.`;
-    }
-    renderAvailabilityGrid();
+  $('#toggleFreeSlotsBtn').addEventListener('click', openMeetingSlotsModal);
+  $('#meetingSlotsDaySelect').addEventListener('change', renderMeetingSlotsPicker);
+  $('#saveMeetingSlotsBtn').addEventListener('click', saveMeetingSlotsFromModal);
+  $('#closeMeetingSlotsModal').addEventListener('click', closeMeetingSlotsModal);
+  $('#meetingSlotsModal').addEventListener('click', e => {
+    if (e.target.id === 'meetingSlotsModal') closeMeetingSlotsModal();
   });
 }
 
@@ -2179,13 +2468,12 @@ function renderAvailabilityGrid() {
       ${timeSlots.map(slot => {
         const isSelected = dayData[name].includes(slot);
         const isOverlap = overlaps.includes(slot);
-        const isEditable = name === editableMember && meetingEditMode;
-        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''} ${isEditable ? 'editable-cell' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
+        return `<div class="availability-cell ${isOverlap ? 'overlap' : isSelected ? 'selected' : ''}" data-slot="${slot}">${isOverlap ? '✓' : ''}</div>`;
       }).join('')}
     </div>
   `).join('');
   $('#availabilityGrid').innerHTML = html;
-  $('#availabilityGrid').classList.toggle('is-editing', meetingEditMode);
+  $('#availabilityGrid').classList.remove('is-editing');
   updateMeetingSuggestion();
 }
 
@@ -2210,9 +2498,10 @@ function ensureEditableMeetingMember() {
 }
 
 function syncMeetingEditState() {
-  $('#toggleFreeSlotsBtn').classList.toggle('active', meetingEditMode);
-  $('#toggleFreeSlotsBtn').textContent = meetingEditMode ? 'Done marking slots' : 'Mark your free slots';
-  $('#meetingEditHint').classList.toggle('visible', meetingEditMode);
+  meetingEditMode = false;
+  $('#toggleFreeSlotsBtn').classList.remove('active');
+  $('#toggleFreeSlotsBtn').textContent = 'Choose your free slots';
+  $('#meetingEditHint').classList.add('visible');
 }
 
 function updateMeetingSuggestion() {
@@ -2225,62 +2514,238 @@ function syncPageMeetingBox() {
 }
 
 function bindCalls() {
-  $('#callForm').addEventListener('submit', e => {
+  $('#callForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const activeGroup = getActiveGroup();
+    const topic = $('#callTitle').value.trim();
+    const date = $('#callDate').value;
+    const time = $('#callTime').value;
+    const feedback = $('#callFormFeedback');
+
+    if (!activeGroup) {
+      feedback.textContent = 'Select a group before starting a call.';
+      return;
+    }
+
+    if (!topic || !date || !time) {
+      feedback.textContent = 'Enter a topic, date, and time.';
+      return;
+    }
+
+    const participants = getActiveTeamMembers();
+    const participantNames = participants.map(member => member.name).filter(Boolean);
+
+    feedback.textContent = 'Generating meeting questions...';
+    const { questions, warning } = await generateCallQuestionsForTopic({
+      topic,
+      groupName: activeGroup.name,
+      participantNames,
+      scheduledDate: date,
+      scheduledTime: time
+    });
+
+    if (supabaseClient && currentUser) {
+      feedback.textContent = 'Starting the call and saving it...';
+
+      try {
+        await performBackendAction('create_call', {
+          groupId: activeGroup.id,
+          topic,
+          date,
+          time,
+          generatedQuestions: questions
+        });
+      } catch (error) {
+        feedback.textContent = error.message;
+        return;
+      }
+
+      e.target.reset();
+      selectedCallId = null;
+      feedback.textContent = warning || 'Call started and saved.';
+      await loadBackendState();
+      return;
+    }
+
     appData.scheduledCalls.push({
       id: Date.now(),
-      title: $('#callTitle').value.trim(),
-      date: $('#callDate').value,
-      time: $('#callTime').value
+      groupId: activeGroup.id,
+      title: topic,
+      date,
+      time,
+      participantNames,
+      generatedQuestions: questions
     });
     e.target.reset();
+    selectedCallId = null;
+    feedback.textContent = warning || 'Call saved locally.';
     renderCalls();
   });
 }
 
 function renderCalls() {
-  $('#scheduledCalls').innerHTML = appData.scheduledCalls.map(call => `
-    <button class="call-item" data-call-id="${call.id}">
-      <h4>${call.title}</h4>
-      <div>${formatShortDate(call.date)} · ${formatTime(call.time)}</div>
-      <small class="muted">Click to highlight on calendar</small>
-    </button>
-  `).join('');
+  const activeGroup = getActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const participants = getActiveTeamMembers().map(member => member.name).filter(Boolean);
+  const note = $('#callParticipantsNote');
+  const feedback = $('#callFormFeedback');
 
-  const days = Array.from({ length: 14 }, (_, i) => i + 1);
-  let selectedDate = null;
-  $('#callCalendar').innerHTML = days.map(day => {
-    const matching = appData.scheduledCalls.filter(call => new Date(call.date).getDate() === day);
+  note.textContent = activeGroup
+    ? `${participants.length || 0} group member${participants.length === 1 ? '' : 's'} will be included automatically.`
+    : 'Select a group to start a team call.';
+
+  if (!activeGroup) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">Select a group chat first, then start a team call here.</p>';
+    $('#callCalendar').innerHTML = '';
+    if (!feedback.textContent) feedback.textContent = '';
+    return;
+  }
+
+  if (supabaseClient && loadedCallsGroupId !== activeGroup.id && !callsLoading) {
+    loadGroupCallsForActiveGroup();
+  }
+
+  if (callsLoading) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">Loading team calls...</p>';
+  } else if (callsError) {
+    $('#scheduledCalls').innerHTML = `<p class="muted">${escapeHtml(callsError)}</p>`;
+  } else if (!calls.length) {
+    $('#scheduledCalls').innerHTML = '<p class="muted">No calls yet for this team. Start one below.</p>';
+  } else {
+    $('#scheduledCalls').innerHTML = calls.map(call => `
+      <button class="call-item ${String(call.id) === String(selectedCallId) ? 'active' : ''}" data-call-id="${call.id}">
+        <h4>${escapeHtml(call.title)}</h4>
+        <div>${formatShortDate(call.date)} · ${formatTime(call.time)}</div>
+        <small class="muted">${call.participantCount || call.participantNames.length} participant${(call.participantCount || call.participantNames.length) === 1 ? '' : 's'}</small>
+        <div class="call-participants">${call.participantNames.map(name => `<span class="call-chip">${escapeHtml(name)}</span>`).join('')}</div>
+        <div class="call-questions">
+          <strong>AI questions</strong>
+          <ul>
+            ${call.generatedQuestions.map(question => `<li>${escapeHtml(question)}</li>`).join('')}
+          </ul>
+        </div>
+      </button>
+    `).join('');
+  }
+
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const calendarDays = Array.from({ length: 14 }, (_, index) => {
+    const day = new Date(start);
+    day.setDate(start.getDate() + index);
+    return day;
+  });
+
+  $('#callCalendar').innerHTML = calendarDays.map(day => {
+    const dateKey = day.toISOString().slice(0, 10);
+    const matching = calls.filter(call => call.date === dateKey);
+    const isSelected = matching.some(call => String(call.id) === String(selectedCallId));
     return `
-      <div class="call-calendar-day" data-date="${day}">
-        <strong>${day}</strong>
-        ${matching.map(call => `<div class="call-chip">${call.title}</div>`).join('')}
+      <div class="call-calendar-day ${isSelected ? 'selected' : ''}" data-date="${dateKey}">
+        <strong>${day.getDate()}</strong>
+        <div class="muted">${day.toLocaleDateString([], { weekday: 'short' })}</div>
+        ${matching.map(call => `<div class="call-chip">${escapeHtml(call.title)}</div>`).join('')}
       </div>
     `;
   }).join('');
 
   $all('.call-item').forEach(btn => {
     btn.addEventListener('click', () => {
-      const call = appData.scheduledCalls.find(c => c.id === Number(btn.dataset.callId));
-      selectedDate = new Date(call.date).getDate();
-      $all('.call-calendar-day').forEach(cell => {
-        cell.style.outline = Number(cell.dataset.date) === selectedDate ? '3px solid #4f46e5' : 'none';
-      });
+      selectedCallId = btn.dataset.callId;
+      renderCalls();
     });
+  });
+}
+
+async function loadTasksForActiveGroup(force = false) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    groupTasks = activeGroup
+      ? appData.tasks
+        .filter(task => String(task.groupId || activeGroup.id) === String(activeGroup.id))
+        .map(normalizeTaskRecord)
+      : [];
+    tasksLoading = false;
+    tasksError = '';
+    loadedTasksGroupId = activeGroup?.id || null;
+    renderTasks();
+    renderDashboard();
+    renderCatchupHighlights();
+    return;
+  }
+
+  if (force) {
+    await loadBackendState();
+    return;
+  }
+
+  syncDerivedStateFromActiveGroup();
+  renderTasks();
+  renderDashboard();
+  renderCatchupHighlights();
+}
+
+async function saveTaskStatus(taskId, status) {
+  const activeGroup = getActiveGroup();
+  if (!supabaseClient || !activeGroup) {
+    const localTask = appData.tasks.find(task => String(task.id) === String(taskId));
+    if (localTask) localTask.status = status;
+    return;
+  }
+
+  await performBackendAction('update_task_status', {
+    groupId: activeGroup.id,
+    taskId,
+    status
   });
 }
 
 function bindTasks() {
   syncMemberDependentInputs();
-  $('#taskForm').addEventListener('submit', e => {
+  $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const activeGroup = getActiveGroup();
     const assignee = $('#taskAssignee').value;
+    const title = $('#taskTitle').value.trim();
+    const priorityRank = Number($('#taskPriority').value);
+    const durationDays = Math.max(1, Number($('#taskDuration').value) || 1);
+    const assigneeMember = getActiveTeamMembers().find(member => member.name === assignee);
+
+    if (!activeGroup) {
+      return;
+    }
+
+    if (supabaseClient && currentUser) {
+      try {
+        await performBackendAction('create_task', {
+          groupId: activeGroup.id,
+          title,
+          assignee,
+          assigneeUserId: assignee === 'N/A' ? null : assigneeMember?.id || null,
+          priorityRank,
+          durationDays
+        });
+      } catch (error) {
+        tasksError = error.message;
+        renderTasks();
+        return;
+      }
+
+      e.target.reset();
+      $('#taskPriority').value = '3';
+      $('#taskDuration').value = '3';
+      tasksError = '';
+      await loadBackendState();
+      return;
+    }
+
     appData.tasks.push({
       id: Date.now(),
-      title: $('#taskTitle').value.trim(),
+      groupId: activeGroup.id,
+      title,
       assignee,
-      priorityRank: Number($('#taskPriority').value),
-      durationDays: Math.max(1, Number($('#taskDuration').value) || 1),
+      priorityRank,
+      durationDays,
       status: assignee === 'N/A' ? 'Not Assigned' : 'Not Started'
     });
     e.target.reset();
@@ -2288,6 +2753,7 @@ function bindTasks() {
     $('#taskDuration').value = '3';
     renderTasks();
     renderDashboard();
+    renderCatchupHighlights();
   });
 }
 
@@ -2359,12 +2825,34 @@ function bindChecklistControls() {
 
 function renderTasks() {
   const container = $('#checklistItems');
-  if (!appData.tasks.length) {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+
+  if (supabaseClient && !activeGroup) {
+    container.innerHTML = '<p class="muted">Select a team chat first to manage that team\'s tasks.</p>';
+    return;
+  }
+
+  if (supabaseClient && loadedTasksGroupId !== activeGroup?.id && !tasksLoading) {
+    loadTasksForActiveGroup();
+  }
+
+  if (tasksLoading) {
+    container.innerHTML = '<p class="muted">Loading tasks...</p>';
+    return;
+  }
+
+  if (tasksError) {
+    container.innerHTML = `<p class="muted">${escapeHtml(tasksError)}</p>`;
+    return;
+  }
+
+  if (!tasks.length) {
     container.innerHTML = '<p class="muted">No tasks yet. Add one on the left.</p>';
     return;
   }
 
-  const filtered = appData.tasks.filter(t => checklistStatusFilter === null || t.status === checklistStatusFilter);
+  const filtered = tasks.filter(t => checklistStatusFilter === null || t.status === checklistStatusFilter);
   const sorted = [...filtered].sort((a, b) => {
     let cmp = 0;
     if (checklistSortBy === 'priority') {
@@ -2452,47 +2940,330 @@ function renderTasks() {
   `;
 
   $all('#checklistItems .checklist-status-select').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const task = appData.tasks.find(t => t.id === Number(sel.dataset.taskId));
+    sel.addEventListener('change', async () => {
+      const task = tasks.find(t => String(t.id) === String(sel.dataset.taskId));
       if (!task) return;
-      task.status = sel.value;
+
+      if (supabaseClient) {
+        try {
+          await saveTaskStatus(task.id, sel.value);
+          task.status = sel.value;
+          groupTasks = groupTasks.map(item => String(item.id) === String(task.id) ? { ...item, status: sel.value } : item);
+        } catch (error) {
+          tasksError = error.message || 'Could not update the task status.';
+        }
+      } else {
+        const localTask = appData.tasks.find(t => String(t.id) === String(task.id));
+        if (localTask) localTask.status = sel.value;
+      }
       renderTasks();
       renderDashboard();
+      renderCatchupHighlights();
     });
   });
 }
 
 function bindCatchup() {
   syncMemberDependentInputs();
-  $('#generateCatchup').addEventListener('click', renderCatchupSummary);
+  $('#generateCatchup').addEventListener('click', async () => {
+    await renderCatchupSummary();
+  });
 }
 
-function renderCatchupSummary() {
+function getRecentMessagesForCatchup(group = getActiveGroup(), limit = 12) {
+  return getGroupMessages(group)
+    .slice()
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .slice(0, limit);
+}
+
+function buildLocalCatchupSummary(memberName) {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const memberTasks = tasks.filter(task => task.assignee === memberName).slice(0, 3);
+  const recentMessages = getRecentMessagesForCatchup(activeGroup, 5);
+  const nextCall = calls[0];
+  const recentSenders = [...new Set(recentMessages.map(message => message.sender).filter(Boolean))];
+
+  return [
+    `${memberName} is currently catching up with ${activeGroup?.name || 'the team'}.`,
+    memberTasks.length
+      ? `Their active tasks include ${memberTasks.map(task => `${task.title} (${task.status})`).join(', ')}.`
+      : 'No tasks are currently assigned to them in this team.',
+    recentSenders.length
+      ? `Recent chat activity involved ${recentSenders.join(', ')}.`
+      : 'There has not been any recent chat activity yet.',
+    nextCall
+      ? `The next scheduled call is ${nextCall.title} on ${formatShortDate(nextCall.date)} at ${formatTime(nextCall.time)}.`
+      : 'There is no scheduled team call yet.'
+  ].join(' ');
+}
+
+async function renderCatchupSummary() {
   const member = $('#catchupMember').value;
   if (!member) {
     $('#catchupSummary').innerHTML = '<div class="summary-card"><p>Select a team member to generate a summary.</p></div>';
     return;
   }
-  const taskItems = appData.tasks.filter(t => t.assignee === member || t.status !== 'Done').slice(0, 3);
-  const meeting = computeSuggestedMeeting();
+
+  const activeGroup = getActiveGroup();
+  const memberRecord = getActiveTeamMembers().find(item => item.name === member);
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const messages = getRecentMessagesForCatchup(activeGroup, 12);
+
+  catchupLoading = true;
+  catchupError = '';
   $('#catchupSummary').innerHTML = `
     <div class="summary-card">
-      <h4>Catch-up for ${member}</h4>
-      <p>Recent discussion focused on finalising the prototype layout, confirming the heatmap feature, and preparing a tutor demo.</p>
-      <p><strong>Important task updates:</strong> ${taskItems.map(t => `${t.title} (${t.status})`).join(', ')}.</p>
-      <p><strong>Upcoming meeting:</strong> ${meeting.labelFull} is currently the best suggested slot.</p>
-      <p><strong>Deadline watch:</strong> Multiple members have overlapping report and coding deadlines this week.</p>
+      <h4>Catch-up for ${escapeHtml(member)}</h4>
+      <p>Writing the catch-up with ChatGPT...</p>
     </div>
   `;
+
+  try {
+    const response = await fetch('/api/catchup-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        memberName: member,
+        memberEmail: memberRecord?.email || '',
+        groupName: activeGroup?.name || '',
+        tasks: tasks.map(task => ({
+          title: task.title,
+          assignee: task.assignee,
+          priorityRank: task.priorityRank,
+          durationDays: task.durationDays,
+          status: task.status
+        })),
+        calls: calls.map(call => ({
+          title: call.title,
+          date: call.date,
+          time: call.time,
+          participantNames: call.participantNames,
+          generatedQuestions: call.generatedQuestions
+        })),
+        messages: messages.map(message => ({
+          sender: message.sender,
+          text: message.text,
+          channelName: message.channelName,
+          date: message.date,
+          time: message.time
+        }))
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Could not generate the catch-up summary.');
+    }
+
+    const summary = String(payload?.summary || '').trim();
+    if (!summary) {
+      throw new Error('The catch-up service returned an empty summary.');
+    }
+
+    $('#catchupSummary').innerHTML = `
+      <div class="summary-card">
+        <h4>Catch-up for ${escapeHtml(member)}</h4>
+        <p>${escapeHtml(summary)}</p>
+      </div>
+    `;
+  } catch (error) {
+    catchupError = error.message || 'Could not generate the catch-up summary.';
+    $('#catchupSummary').innerHTML = `
+      <div class="summary-card">
+        <h4>Catch-up for ${escapeHtml(member)}</h4>
+        <p>${escapeHtml(catchupError)} Showing the local summary instead.</p>
+        <p>${escapeHtml(buildLocalCatchupSummary(member))}</p>
+      </div>
+    `;
+  } finally {
+    catchupLoading = false;
+  }
 }
 
 function renderCatchupHighlights() {
+  const activeGroup = getActiveGroup();
+  const tasks = getTasksForActiveGroup();
+  const calls = getCallsForActiveGroup();
+  const messages = getRecentMessagesForCatchup(activeGroup, 4);
+  const highlightedTask = tasks.find(task => task.status === 'In Progress') || tasks[0];
+  const highlightedCall = calls[0];
+  const latestMessage = messages[0];
+
   $('#recentHighlights').innerHTML = `
-    <div class="insight-item"><strong>Chat summary:</strong> Team agreed the heatmap and meeting decider should be the main demo focus.</div>
-    <div class="insight-item"><strong>Task movement:</strong> “Prepare tutor demo script” moved to Review.</div>
-    <div class="insight-item"><strong>Meeting note:</strong> Wednesday 4–5pm remains the strongest common time slot.</div>
-    <div class="insight-item"><strong>Reminder logic:</strong> End-of-day discussion summary and deadline reminders are enabled.</div>
+    <div class="insight-item"><strong>Chat summary:</strong> ${latestMessage ? `${escapeHtml(latestMessage.sender)} recently said "${escapeHtml(formatMessagePreview(latestMessage.text, 90))}" in # ${escapeHtml(latestMessage.channelName)}.` : 'No recent team chat yet.'}</div>
+    <div class="insight-item"><strong>Task movement:</strong> ${highlightedTask ? `${escapeHtml(highlightedTask.title)} is ${escapeHtml(highlightedTask.status.toLowerCase())} with priority ${highlightedTask.priorityRank}.` : 'No tasks have been added for this team yet.'}</div>
+    <div class="insight-item"><strong>Meeting note:</strong> ${highlightedCall ? `${escapeHtml(highlightedCall.title)} is scheduled for ${formatShortDate(highlightedCall.date)} at ${formatTime(highlightedCall.time)}.` : 'No team calls have been scheduled yet.'}</div>
+    <div class="insight-item"><strong>Reminder logic:</strong> ${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length} message${getMentionMessages().filter(message => message.groupName === activeGroup?.name).length === 1 ? '' : 's'} currently mention someone in this group.</div>
   `;
+}
+
+function renderSecurityLab() {
+  const activeGroup = getActiveGroup();
+  const encryptionBadge = $('#securityEncryptionBadge');
+  const toggleBtn = $('#toggleInsecureChatBtn');
+  const inspectBtn = $('#inspectLatestMessageBtn');
+  const attackEmail = $('#securityAttackEmail');
+  const rateLimitBadge = $('#securityRateLimitBadge');
+  const toggleRateLimitBtn = $('#toggleRateLimitBtn');
+
+  if (attackEmail && !attackEmail.value && currentUser?.email) {
+    attackEmail.value = currentUser.email;
+  }
+
+  if (securityDemoDisableEncryptionForNextMessage) {
+    encryptionBadge.textContent = 'Next message insecure';
+    toggleBtn.textContent = 'Re-enable secure chat';
+    toggleBtn.classList.remove('danger-btn');
+    toggleBtn.classList.add('secondary-btn');
+  } else {
+    encryptionBadge.textContent = 'Secure mode';
+    toggleBtn.textContent = 'Disable E2EE for next message';
+    toggleBtn.classList.add('danger-btn');
+    toggleBtn.classList.remove('secondary-btn');
+  }
+
+  toggleBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
+  inspectBtn.disabled = !supabaseClient || !currentUser || !activeGroup;
+  if (securityRateLimitState.disabled) {
+    rateLimitBadge.textContent = 'Rate limit off';
+    toggleRateLimitBtn.textContent = 'Re-enable login rate limit';
+    toggleRateLimitBtn.classList.remove('danger-btn');
+    toggleRateLimitBtn.classList.add('secondary-btn');
+  } else {
+    rateLimitBadge.textContent = `Rate limit on (${securityRateLimitState.maxAttempts}/min)`;
+    toggleRateLimitBtn.textContent = 'Disable login rate limit';
+    toggleRateLimitBtn.classList.add('danger-btn');
+    toggleRateLimitBtn.classList.remove('secondary-btn');
+  }
+  toggleRateLimitBtn.disabled = !supabaseClient || !currentUser;
+  $('#latestMessagePayload').textContent = securityLatestMessagePayload;
+  $('#securityAttackResults').textContent = securityAttackSummary;
+}
+
+async function refreshLoginRateLimitStatus() {
+  if (!supabaseClient || !currentUser) return;
+  try {
+    const payload = await performBackendAction('get_login_rate_limit_status');
+    securityRateLimitState = {
+      ...securityRateLimitState,
+      ...(payload || {})
+    };
+  } catch (error) {
+    console.warn('Could not load login rate limit status.', error);
+  }
+}
+
+function bindSecurityLab() {
+  $('#toggleInsecureChatBtn').addEventListener('click', () => {
+    if (!supabaseClient || !currentUser || !getActiveGroup()) {
+      $('#securityMessageFeedback').textContent = 'Select a real group before running the interception demo.';
+      return;
+    }
+    securityDemoDisableEncryptionForNextMessage = !securityDemoDisableEncryptionForNextMessage;
+    $('#securityMessageFeedback').textContent = securityDemoDisableEncryptionForNextMessage
+      ? 'The next message you send in this group will be stored in plaintext for the demo.'
+      : 'Secure chat has been restored for the next message.';
+    renderSecurityLab();
+  });
+
+  $('#inspectLatestMessageBtn').addEventListener('click', async () => {
+    const activeGroup = getActiveGroup();
+    if (!supabaseClient || !currentUser || !activeGroup) {
+      $('#securityMessageFeedback').textContent = 'Select a real group before inspecting messages.';
+      return;
+    }
+    $('#securityMessageFeedback').textContent = 'Inspecting the latest stored message...';
+    try {
+      const payload = await performBackendAction('peek_latest_message', { groupId: activeGroup.id });
+      securityLatestMessagePayload = JSON.stringify(payload.message || {}, null, 2);
+      $('#securityMessageFeedback').textContent = 'Latest message record loaded from the database.';
+    } catch (error) {
+      $('#securityMessageFeedback').textContent = error.message || 'Could not inspect the latest message.';
+    }
+    renderSecurityLab();
+  });
+
+  $('#toggleRateLimitBtn').addEventListener('click', async () => {
+    if (!supabaseClient || !currentUser) {
+      $('#securityAttackFeedback').textContent = 'Sign in before changing the login protection demo.';
+      return;
+    }
+    $('#securityAttackFeedback').textContent = securityRateLimitState.disabled
+      ? 'Re-enabling the login rate limit...'
+      : 'Disabling the login rate limit for the demo...';
+    try {
+      const payload = await performBackendAction('set_login_rate_limit_disabled', {
+        disabled: !securityRateLimitState.disabled
+      });
+      securityRateLimitState = {
+        ...securityRateLimitState,
+        ...(payload || {})
+      };
+      $('#securityAttackFeedback').textContent = securityRateLimitState.disabled
+        ? 'Login rate limiting is now disabled for the brute-force demo.'
+        : 'Login rate limiting is active again.';
+    } catch (error) {
+      $('#securityAttackFeedback').textContent = error.message || 'Could not change the login rate limit demo state.';
+    }
+    renderSecurityLab();
+  });
+
+  $('#securityAttackForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('#securityAttackEmail').value.trim().toLowerCase();
+    const count = Math.max(3, Math.min(20, Number($('#securityAttackCount').value || 5)));
+    if (!email) {
+      $('#securityAttackFeedback').textContent = 'Enter an email address to target.';
+      return;
+    }
+    if (!isBrowserSecureForCredentials()) {
+      $('#securityAttackFeedback').textContent = getSecureTransportWarning();
+      return;
+    }
+
+    $('#securityAttackFeedback').textContent = 'Running failed sign-in burst...';
+    const startedAt = performance.now();
+    const results = [];
+    for (let index = 0; index < count; index += 1) {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          email,
+          password: `wrong-password-${index + 1}`
+        })
+      });
+      results.push(response.status);
+    }
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    const blockedAttempts = results.filter(status => status === 429).length;
+    const failedAttempts = results.filter(status => status === 401).length;
+    securityAttackSummary = [
+      `Rate limit status: ${securityRateLimitState.disabled ? 'disabled for demo' : `enabled (${securityRateLimitState.maxAttempts} attempts / ${Math.round(securityRateLimitState.windowMs / 1000)}s)`}`,
+      `Target: ${email}`,
+      `Attempts sent: ${count}`,
+      `HTTP 401 responses: ${failedAttempts}`,
+      `HTTP 429 responses: ${blockedAttempts}`,
+      `Elapsed time: ${elapsedMs} ms`,
+      blockedAttempts
+        ? 'A rate limit blocked some requests.'
+        : 'No request was rate-limited. This demonstrates a brute-force / no-rate-limiting weakness.'
+    ].join('\n');
+    $('#securityAttackFeedback').textContent = blockedAttempts
+      ? 'The server blocked some attempts.'
+      : 'Every bad guess was processed. This is the vulnerability to record.';
+    await refreshLoginRateLimitStatus();
+    renderSecurityLab();
+  });
+
+  refreshLoginRateLimitStatus().then(renderSecurityLab);
 }
 
 function bindGroupModal() {
@@ -2511,59 +3282,36 @@ function bindGroupModal() {
     const topic = $('#groupTopicInput').value.trim() || 'General';
 
     if (supabaseClient && currentUser) {
-      const selectedMemberIds = [
-        ...$all('.group-member-checkbox:checked').map(input => input.value)
-      ].filter(Boolean);
+      const selectedMemberIds = [...$all('.group-member-checkbox:checked').map(input => input.value)].filter(Boolean);
+      const selectedMembers = availableChatMembers.filter(member => selectedMemberIds.includes(String(member.id)));
+      const selfMember = {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        publicKeyJwk: currentUser.crypto?.publicKeyJwk || null
+      };
 
-      const { data: groupData, error: groupError } = await supabaseClient.rpc('create_chat_group', {
-        group_name: name,
-        first_channel_name: topic,
-        member_ids: selectedMemberIds
-      });
-
-      if (groupError) {
-        chatLoadError = groupError.message;
+      try {
+        const { groupKey, keyVersion, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers([selfMember, ...selectedMembers], 1);
+        const payload = await performBackendAction('create_group', {
+          name,
+          topic,
+          memberIds: selectedMemberIds,
+          keyEnvelopes
+        });
+        cacheGroupKey(payload.groupId, keyVersion, groupKey);
+        activeGroupId = payload.groupId || null;
+        activeChannelId = payload.channelId || null;
+      } catch (error) {
+        chatLoadError = error.message;
         renderChat();
         return;
       }
-
-      const createdGroup = Array.isArray(groupData) ? groupData[0] : groupData;
-      chatLoadVersion += 1;
-      appData.groups.unshift({
-        id: createdGroup?.group_id,
-        name,
-        createdBy: currentUser.id,
-        leaderId: currentUser.id,
-        channels: [
-          {
-            id: createdGroup?.channel_id,
-            name: topic,
-            messages: [
-              {
-                id: `local-${Date.now()}`,
-                senderId: currentUser.id,
-                sender: 'System',
-                text: `Welcome to ${name}.`,
-                time: 'Now',
-                date: new Date().toISOString().slice(0, 10),
-                createdAt: new Date().toISOString()
-              }
-            ]
-          }
-        ]
-      });
-
-      activeGroupId = createdGroup?.group_id || null;
-      activeChannelId = createdGroup?.channel_id || null;
       chatLoadError = '';
       ensureActiveChatSelection();
       e.target.reset();
       $('#groupModal').classList.add('hidden');
-      renderChat();
-      await loadChatFromDatabase();
-      ensureActiveChatSelection();
-      await loadTeamMembersForActiveGroup();
-      renderChat();
+      await loadBackendState();
       return;
     }
 
@@ -2630,34 +3378,26 @@ function bindAddMemberModal() {
       return;
     }
 
-    let addedMember = null;
-
     try {
-      const { data, error } = await supabaseClient.rpc('add_chat_group_member_by_email', {
-        target_group_id: activeGroup.id,
-        member_email: email
-      });
-
-      if (error) {
-        if (isMissingRpcError(error, 'add_chat_group_member_by_email')) {
-          addedMember = await addMemberByEmailFallback(activeGroup.id, email);
-        } else {
-          throw error;
-        }
-      } else {
-        addedMember = Array.isArray(data) ? data[0] : data;
+      const targetMember = availableChatMembers.find(member => String(member.email || '').toLowerCase() === email);
+      if (!targetMember) {
+        throw new Error('No user found with that email.');
       }
+      const activeGroupKeyEnvelope = await createGroupKeyEnvelopeForMember(activeGroup, targetMember);
+      const addedMember = await performBackendAction('add_member_by_email', {
+        groupId: activeGroup.id,
+        email,
+        encryptedGroupKey: activeGroupKeyEnvelope.encryptedKey,
+        encryptedGroupKeyIv: activeGroupKeyEnvelope.iv,
+        keyVersion: activeGroupKeyEnvelope.version
+      });
+      $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
     } catch (error) {
       $('#addMemberFeedback').textContent = error.message || 'Could not add that member.';
       return;
     }
-
-    $('#addMemberFeedback').textContent = `${addedMember?.added_full_name || addedMember?.added_email || email} added.`;
     $('#addMemberForm').reset();
-    chatLoadVersion += 1;
-    loadChatMemberDirectory();
-    await loadChatFromDatabase();
-    await loadTeamMembersForActiveGroup();
+    await loadBackendState();
     window.setTimeout(() => {
       $('#addMemberModal').classList.add('hidden');
       $('#addMemberFeedback').textContent = '';
@@ -2696,44 +3436,38 @@ function bindMembersDirectory() {
 
     if (button.dataset.action === 'set-leader') {
       feedback.textContent = 'Updating leader...';
-      const { error } = await supabaseClient.rpc('set_chat_group_leader', {
-        target_group_id: activeGroup.id,
-        target_user_id: memberId
-      });
-
-      if (error) {
-        if (isMissingRpcError(error, 'set_chat_group_leader')) {
-          feedback.textContent = 'Leader management is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
-          return;
-        }
+      try {
+        await performBackendAction('set_leader', {
+          groupId: activeGroup.id,
+          userId: memberId
+        });
+      } catch (error) {
         feedback.textContent = error.message;
         return;
       }
 
-      await loadChatFromDatabase();
-      await loadTeamMembersForActiveGroup();
+      await loadBackendState();
       feedback.textContent = 'Leader updated.';
       return;
     }
 
     if (button.dataset.action === 'remove-member') {
       feedback.textContent = 'Removing member...';
-      const { error } = await supabaseClient.rpc('remove_chat_group_member', {
-        target_group_id: activeGroup.id,
-        target_user_id: memberId
-      });
-
-      if (error) {
-        if (isMissingRpcError(error, 'remove_chat_group_member')) {
-          feedback.textContent = 'Member removal is not installed in Supabase yet. Re-run supabase-chat-schema.sql.';
-          return;
-        }
+      try {
+        const remainingMembers = getActiveTeamMembers().filter(item => String(item.id) !== String(memberId));
+        const { groupKey, keyVersion, keyEnvelopes } = await buildGroupKeyEnvelopesForMembers(remainingMembers, getLatestGroupKeyVersion(activeGroup) + 1);
+        await performBackendAction('remove_member', {
+          groupId: activeGroup.id,
+          userId: memberId,
+          replacementKeyEnvelopes: keyEnvelopes
+        });
+        cacheGroupKey(activeGroup.id, keyVersion, groupKey);
+      } catch (error) {
         feedback.textContent = error.message;
         return;
       }
 
-      await loadChatFromDatabase();
-      await loadTeamMembersForActiveGroup();
+      await loadBackendState();
       feedback.textContent = 'Member removed.';
     }
   });
@@ -2777,29 +3511,23 @@ function bindMembersDirectory() {
       return;
     }
 
-    const { data, error } = await supabaseClient.rpc('upsert_chat_group_member_profile', {
-      p_group_id: activeGroup.id,
-      p_user_id: memberId,
-      p_role: payload.role,
-      p_current_task: payload.currentTask,
-      p_stage: payload.stage,
-      p_workload: payload.workload,
-      p_deadline: payload.deadline || null
-    });
-
-    if (error) {
-      if (isMissingRpcError(error, 'upsert_chat_group_member_profile')) {
-        feedback.textContent = 'The save RPC is not installed in Supabase yet. Re-run supabase-chat-schema.sql, then try again.';
-        return;
-      }
+    try {
+      await performBackendAction('save_member_profile', {
+        groupId: activeGroup.id,
+        userId: memberId,
+        role: payload.role,
+        currentTask: payload.currentTask,
+        stage: payload.stage,
+        workload: payload.workload,
+        deadline: payload.deadline || null
+      });
+      await loadBackendState();
+      feedback.textContent = 'Saved.';
+      renderMemberDrivenViews();
+    } catch (error) {
       feedback.textContent = error.message;
       return;
     }
-
-    const savedMember = normalizeTeamMember(Array.isArray(data) ? data[0] : data);
-    teamMembers = teamMembers.map(item => String(item.id) === String(memberId) ? savedMember : item);
-    feedback.textContent = 'Saved.';
-    renderMemberDrivenViews();
   });
 }
 
