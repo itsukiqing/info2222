@@ -3,6 +3,7 @@ const {
   createSession,
   ensureShadowAuthUser,
   formatUser,
+  hasStoredPassword,
   PRIVATE_KEY_ITERATIONS,
   requireSecureRequest,
   supabaseRest
@@ -42,8 +43,8 @@ module.exports = async function handler(req, res) {
 
   try {
     const [existingByEmail, existingByUsername] = await Promise.all([
-      supabaseRest(`profiles?select=id,email,username,full_name,password_hash,password_salt&email=eq.${encodeURIComponent(email)}&limit=1`),
-      supabaseRest(`profiles?select=id,email,username,password_hash,password_salt&username=eq.${encodeURIComponent(username)}&limit=1`)
+      supabaseRest(`profiles?select=id,email,username,full_name,password_hash,password_salt,password_algorithm&email=eq.${encodeURIComponent(email)}&limit=1`),
+      supabaseRest(`profiles?select=id,email,username,password_hash,password_salt,password_algorithm&username=eq.${encodeURIComponent(username)}&limit=1`)
     ]);
 
     const existingEmailProfile = existingByEmail[0] || null;
@@ -61,7 +62,7 @@ module.exports = async function handler(req, res) {
     let profile = null;
 
     if (existingEmailProfile) {
-      if (existingEmailProfile.password_hash && existingEmailProfile.password_salt) {
+      if (hasStoredPassword(existingEmailProfile)) {
         res.status(409).json({ error: 'An account with that email already exists.' });
         return;
       }
@@ -83,7 +84,7 @@ module.exports = async function handler(req, res) {
         }
       });
 
-      const refreshedProfiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${existingEmailProfile.id}&limit=1`);
+      const refreshedProfiles = await supabaseRest(`profiles?select=id,username,email,full_name,role,password_hash,password_salt,password_iterations,password_algorithm,public_key_jwk,encrypted_private_key,private_key_iv,private_key_salt,private_key_iterations&id=eq.${existingEmailProfile.id}&limit=1`);
       profile = firstRow(refreshedProfiles);
     } else {
       const shadowUser = await ensureShadowAuthUser({ email, fullName, username });

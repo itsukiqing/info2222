@@ -5,6 +5,7 @@ const {
   createPasswordRecord,
   formatUser,
   getLoginRateLimitStatusForKey,
+  hasStoredPassword,
   needsPasswordUpgrade,
   registerFailedLoginAttempt,
   requireSecureRequest,
@@ -49,7 +50,7 @@ module.exports = async function handler(req, res) {
       return;
     }
 
-    if (!profile.password_hash || !profile.password_salt) {
+    if (!hasStoredPassword(profile)) {
       res.status(400).json({ error: 'This account still uses the old sign-in system. Use Register once with the same email to set a new password.' });
       return;
     }

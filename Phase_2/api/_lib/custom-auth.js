@@ -156,6 +156,11 @@ function isArgon2Profile(profile) {
   return algorithm === 'argon2id' || hash.startsWith('$argon2id$');
 }
 
+function hasStoredPassword(profile) {
+  if (!profile?.password_hash) return false;
+  return isArgon2Profile(profile) || Boolean(profile?.password_salt);
+}
+
 async function verifyPassword(password, profile) {
   if (isArgon2Profile(profile)) {
     try {
@@ -402,5 +407,6 @@ module.exports = {
   formatUser,
   setLoginRateLimitDisabled,
   needsPasswordUpgrade,
-  createLegacyPasswordRecord
+  createLegacyPasswordRecord,
+  hasStoredPassword
 };
